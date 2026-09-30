@@ -1,0 +1,11 @@
+﻿Build started 9/30/2026 1:59:55 AM.
+     1>Project "D:\Niloys project\character animation (1)\demo2\demo\demo\demo\demo.vcxproj" on node 2 (Build target(s)).
+     1>C:\Program Files (x86)\MSBuild\Microsoft.Cpp\v4.0\V120\Microsoft.CppBuild.targets(355,5): warning MSB8003: Could not find WindowsSDKDir variable from the registry.  TargetFrameworkVersion or PlatformToolset may be set to an invalid version number.
+     1>Link:
+         C:\Program Files (x86)\Microsoft Visual Studio 12.0\VC\bin\link.exe /ERRORREPORT:PROMPT /OUT:"D:\Niloys project\character animation (1)\demo2\demo\demo\Debug\demo.exe" /INCREMENTAL /NOLOGO kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib /MANIFEST /MANIFESTUAC:"level='asInvoker' uiAccess='false'" /manifest:embed /DEBUG /PDB:"D:\Niloys project\character animation (1)\demo2\demo\demo\Debug\demo.pdb" /TLBID:1 /DYNAMICBASE /NXCOMPAT /IMPLIB:"D:\Niloys project\character animation (1)\demo2\demo\demo\Debug\demo.lib" /MACHINE:X86 Debug\iMain.obj
+         demo.vcxproj -> D:\Niloys project\character animation (1)\demo2\demo\demo\Debug\demo.exe
+     1>Done Building Project "D:\Niloys project\character animation (1)\demo2\demo\demo\demo\demo.vcxproj" (Build target(s)).
+
+Build succeeded.
+
+Time Elapsed 00:00:00.78

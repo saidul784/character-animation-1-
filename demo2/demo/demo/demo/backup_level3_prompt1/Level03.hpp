@@ -1,0 +1,2473 @@
+/*
+ *  Level03.hpp  --  Honda Rush: Career Rider, LEVEL 03
+ *
+ *  A fixed 13-screen route through the city, ridden on the same kind of
+ *  road/world system as level 02: thirteen background panels laid end to
+ *  end (BG1 -> BG13, never shuffled), a separate playable road drawn in
+ *  front of them, and every ramp, car, robber, tank, coin and fuel can
+ *  placed at a fixed world position.
+ *
+ *  THE ROUTE
+ *      BG1   open road, basic coins, Song 1 starts
+ *      BG2   Ramp 1 (the 360 degree loop) + two oncoming cars
+ *      BG3   Ramp 2 (launch ramp)         + two oncoming cars
+ *      BG4   first fight: 6 robbers + 1 tank. ENTER gets off the Honda,
+ *            Song 1 stops and Song 2 starts at that moment.
+ *      BG5   second fight: 15 robbers + 2 tanks
+ *      BG6 .. BG13   open road with coins and fuel, finish at the end
+ *
+ *  THE PLAYER IS ALWAYS IN EXACTLY ONE MODE
+ *      L3_MODE_BIKE      riding the Honda        (D A W S V, SPACE shoots)
+ *      L3_MODE_LOOP      inside the 360 loop     (no input, physics only)
+ *      L3_MODE_DISMOUNT  getting off animation   (no input)
+ *      L3_MODE_FOOT      walking / running       (D A W S, SPACE shoots)
+ *      L3_MODE_MOUNT     getting on animation    (no input)
+ *  Bike physics only ever runs in BIKE mode and walking physics only in
+ *  FOOT mode, so the two control sets can never interfere.
+ *
+ *  Entry points used by iMain.cpp:
+ *      level03Init()         load the artwork once, at start up
+ *      level03Reset()        build and start the route
+ *      level03HandleInput()  edge-triggered keys (ENTER, V, P, cheat code)
+ *      updateLevel03()       one fixed step
+ *      drawLevel03()         render
+ *
+ *  Reuses from level 02 (same translation unit): the coin artwork and
+ *  values (l2CoinTex, L2_COIN_VALUE), the fuel can artwork (l2FuelTex)
+ *  and the L2Coin / L2Fuel structs - Level 3 keeps the basic Level 2 coins.
+ */
+
+#ifndef LEVEL03_HPP
+#define LEVEL03_HPP
+
+/* ==================== ARTWORK ==================== */
+
+#define L3_DIR  "../Level 3/"
+#define L3_ART  "Level3Art/"
+
+/*  BG1..BG8 are 4000x2252 photos. Level3Art holds 1364x768 copies of the
+    same pictures (the size every other level uses) so the game does not
+    push eight 36 MB textures to the graphics card. BG9..BG13 are already
+    1364x768 and are read straight from the Level 3 folder.              */
+#define L3_BG_COUNT 13
+
+static const char *L3_BG_FILE[L3_BG_COUNT] =
+{
+	L3_ART "L3_bg_1.jpg",
+	L3_ART "L3_bg_2.jpg",
+	L3_ART "L3_bg_3.jpg",
+	L3_ART "L3_bg_4.jpg",
+	L3_ART "L3_bg_5.jpg",
+	L3_ART "L3_bg_6.jpg",
+	L3_ART "L3_bg_7.jpg",
+	L3_ART "L3_bg_8.jpg",
+	L3_DIR "Background_pic_9.png",
+	L3_DIR "Background_pic_10.jpeg",
+	L3_DIR "Background_pic_11.png",
+	L3_DIR "Background_pic_12.png",
+	L3_DIR "Background_pic_13.png"
+};
+
+/* the three riding poses share one crop, so the tyres never jump */
+static const char *L3_BIKE_FILE[3] =
+{
+	L3_DIR "normal_riding.png",
+	L3_DIR "fast_riding.png",
+	L3_DIR "very_fast_riding.png"
+};
+
+/* ==================== TUNING ==================== */
+
+#define L3_GROUND_Y          150.0
+#define L3_BG_Y_OFFSET       -45
+#define L3_BG_PARALLAX       0.45
+
+#define L3_SCREEN_X          210.0   /* bike's left edge on screen          */
+#define L3_BIKE_W            220     /* height follows the artwork          */
+#define L3_WHEEL_REAR        0.205   /* measured off the Level 3 PNGs       */
+#define L3_WHEEL_FRONT       0.842
+#define L3_RIDER_ON_BIKE_X   0.34    /* where the rider stands after getting off */
+
+/* riding - the same feel as level 02 */
+#define L3_ACCEL             0.34
+#define L3_BRAKE             0.40
+#define L3_COAST             0.020
+#define L3_MAX_SPEED        16.0
+#define L3_REVERSE_MAX       4.0     /* A keeps rolling the Honda backwards */
+#define L3_FAST_SPRITE_AT    8.0
+#define L3_VFAST_SPRITE_AT  19.0
+
+/* VOLT SPEED - press V at any time */
+#define L3_VOLT_MAX_SPEED   30.0
+#define L3_VOLT_ACCEL        0.90
+#define L3_VOLT_TICKS        240     /* about 4 seconds per press           */
+#define L3_OVERSPEED_DECAY   0.25    /* how fast the extra speed fades out  */
+
+/* jumping */
+#define L3_GRAVITY           0.70
+#define L3_JUMP_VELOCITY    17.0
+#define L3_FAST_FALL         0.95
+#define L3_RAMP_LAUNCH       0.90
+#define L3_LAUNCH_MIN_GAIN   0.30
+#define L3_LAUNCH_SPEED_GAIN 1.40
+#define L3_CEILING_Y       470.0     /* wheels never higher than this       */
+#define L3_WALL_STEP        40.0     /* a sudden rise this big is a wall    */
+
+/* the 360 loop */
+#define L3_LOOP_MIN_SPEED   21.0     /* only VOLT SPEED gets there          */
+#define L3_LOOP_SPIN         0.50    /* visual pace of the loop             */
+
+/* fuel */
+#define L3_FUEL_MAX        100.0
+#define L3_FUEL_DRAIN        0.040
+#define L3_FUEL_VOLT_DRAIN   0.100
+#define L3_FUEL_PICKUP      35.0
+
+/* on foot */
+#define L3_FOOT_H          172.0     /* rider's standing height on screen   */
+#define L3_FOOT_WALK         3.2
+#define L3_FOOT_RUN          6.4
+#define L3_FOOT_BACK         2.6
+#define L3_FOOT_ACCEL        0.45
+#define L3_RUN_AFTER_TICKS   24      /* hold D this long and he runs        */
+#define L3_FOOT_JUMP        17.0
+#define L3_FOOT_FAST_FALL    1.20
+#define L3_MOUNT_RANGE     120.0     /* how close to the Honda for ENTER    */
+
+/* cars */
+#define L3_CAR_SPEED         9.0
+#define L3_CAR_W           330.0
+#define L3_CAR_GAP_TICKS     20      /* extra breathing room before car 2 appears */
+
+/* robbers */
+#define L3_ROBBER_H        168.0
+#define L3_ROBBER_WAKE    1000.0     /* they start walking when this close  */
+#define L3_ROBBER_REACH     95.0
+#define L3_ROBBER_HP         3       /* bullets to put one down             */
+#define L3_HURT_TICKS        50      /* invulnerable after a hit            */
+
+/* tanks */
+#define L3_TANK_W          380.0
+#define L3_TANK_SPEED        0.9
+#define L3_TANK_WAKE       850.0
+#define L3_TANK_HP          35
+
+/* shooting */
+#define L3_FIRE_EVERY        7       /* ticks between bullets while SPACE held */
+#define L3_BULLET_SPEED     24.0
+#define L3_BULLET_LIFE      60
+
+/* ==================== WORLD LAYOUT ==================== */
+
+/*  One background panel is this many world pixels long; the player
+    enters panel i (BG i+1) at L3_PANEL(i).                              */
+#define L3_PANEL_SPAN       (SCREEN_WIDTH / L3_BG_PARALLAX)
+#define L3_PANEL(i)         ((i) * L3_PANEL_SPAN + L3_SCREEN_X)
+
+const double L3_ROUTE_END = (L3_BG_COUNT - 1) * (double)SCREEN_WIDTH / L3_BG_PARALLAX;
+
+/* BG13 stops scrolling at L3_ROUTE_END; the Honda rides on into it and
+   the level ends in the middle of the last picture. */
+#define L3_FINISH_X        (L3_ROUTE_END + L3_SCREEN_X + 640.0)
+
+#define L3_LOOP_X          (L3_PANEL(1) + 250.0)    /* BG2 : Ramp 1 (loop) */
+#define L3_LOOP_W        1060.0
+#define L3_RAMP2_X         (L3_PANEL(2) + 1000.0)   /* BG3 : Ramp 2        */
+#define L3_RAMP2_W        560.0
+#define L3_GATE_X          (L3_PANEL(3) + 1750.0)   /* BG4 : robbers block the road */
+#define L3_DISMOUNT_FROM   (L3_PANEL(3) - 300.0)    /* ENTER works from here on     */
+
+/* robber groups: each fight has its own hit limit */
+#define L3_GROUP_BG4         0
+#define L3_GROUP_BG5         1
+static const int L3_GROUP_HIT_LIMIT[2] = { 3, 6 };
+
+#define L3_ROBBER_COUNT     21       /* 6 in BG4 + 15 in BG5 */
+#define L3_TANK_COUNT        3       /* 1 in BG4 + 2 in BG5  */
+#define L3_CAR_COUNT         4       /* 2 in BG2 + 2 in BG3  */
+#define L3_MAX_COINS       260
+#define L3_FUEL_COUNT        6
+#define L3_MAX_BULLETS      64
+#define L3_MAX_BOOMS         8
+#define L3_PROFILE_N        96
+
+/* ==================== TYPES ==================== */
+
+/* one picture, cropped to its visible pixels */
+struct L3Img
+{
+	unsigned int tex;
+	int w, h;
+};
+
+struct L3Ramp
+{
+	unsigned int tex;
+	double x, w, h;
+	double prof[L3_PROFILE_N];     /* surface height above the road */
+};
+
+#define L3_CAR_WAITING  0
+#define L3_CAR_DRIVING  1
+#define L3_CAR_DONE     2
+
+struct L3Car
+{
+	double x;
+	int    art;
+	int    state;
+	int    delay;          /* countdown before it is allowed to appear */
+	bool   passed;         /* it is behind the Honda now               */
+};
+
+#define L3_ROB_SLEEP    0
+#define L3_ROB_WALK     1
+#define L3_ROB_ATTACK   2
+#define L3_ROB_DEAD     3
+
+struct L3Robber
+{
+	double x;
+	int    type;           /* 0 = robber 1, 1 = robber 2 */
+	int    group;
+	int    state;
+	int    hp;
+	int    timer;
+	int    cooldown;
+	int    facing;         /* -1 left (the art), +1 right (mirrored) */
+	double speed;
+	double anim;
+	bool   struck;         /* this swing already landed     */
+	bool   bumped;         /* already hit the moving Honda  */
+	int    deadArt;
+};
+
+struct L3Tank
+{
+	double x;
+	bool   awake;
+	bool   alive;
+	bool   gone;
+	int    hp;
+	int    flash;
+};
+
+struct L3Bullet
+{
+	double x, y, vx;
+	int    life;
+	bool   active;
+};
+
+struct L3Boom
+{
+	double x, y;
+	int    t;
+	bool   active;
+};
+
+/* ==================== STATE ==================== */
+
+#define LEVEL03_PLAYING   0
+#define LEVEL03_WIN       1
+#define LEVEL03_GAMEOVER  2
+
+#define L3_LOSE_NONE      0
+#define L3_LOSE_FUEL      1
+#define L3_LOSE_CAR       2
+#define L3_LOSE_TANK      3
+#define L3_LOSE_ROBBERS   4
+
+#define L3_MODE_BIKE      0
+#define L3_MODE_LOOP      1
+#define L3_MODE_DISMOUNT  2
+#define L3_MODE_FOOT      3
+#define L3_MODE_MOUNT     4
+
+int l3State;
+int l3LoseReason;
+int l3Mode;
+bool l3Paused;
+
+/* artwork */
+unsigned int l3BgTex[L3_BG_COUNT] = { 0 };
+SpriteSheet  l3Bike;                   /* normal / fast / very fast */
+L3Img l3Loop45, l3LoopUp, l3LoopTop, l3LoopDown;
+L3Img l3Parked;
+L3Img l3GetDown, l3AfterDown2, l3AfterDown3, l3GetUp;
+L3Img l3Walk[4], l3Run[4], l3WalkFire[4], l3StandFire[2], l3Murdered[3];
+L3Img l3Rob1Walk[3], l3Rob1Kill[2], l3Rob2Walk[2], l3Rob2Kill[2], l3RobDead[3];
+L3Img l3CarArt[3];
+L3Img l3TankArt;
+L3Img l3LoopArt;
+
+int    l3BikeW, l3BikeH;
+double l3FootScale, l3Rob1Scale, l3Rob2Scale;
+
+/* world */
+L3Ramp   l3Ramp2;
+L3Car    l3Cars[L3_CAR_COUNT];
+L3Robber l3Robbers[L3_ROBBER_COUNT];
+L3Tank   l3Tanks[L3_TANK_COUNT];
+L2Coin   l3Coins[L3_MAX_COINS];
+L2Fuel   l3Fuels[L3_FUEL_COUNT];
+L3Bullet l3Bullets[L3_MAX_BULLETS];
+L3Boom   l3Booms[L3_MAX_BOOMS];
+int      l3CoinCount;
+
+/* camera */
+double l3Cam;
+
+/* the Honda */
+double l3BikeX, l3BikeY, l3BikeVY, l3Speed, l3BikeAngle;
+double l3PrevGround, l3LastClimb;
+bool   l3OnGround;
+bool   l3JumpRequested;
+int    l3VoltTicks;
+
+/* the loop */
+double l3LoopPhi, l3LoopEnergy;
+int    l3LoopDir;
+bool   l3LoopCleared, l3Ramp2Cleared;
+
+/* the rider on foot */
+double l3FootX, l3FootY, l3FootVX, l3FootVY;
+bool   l3FootOnGround;
+int    l3Facing;
+int    l3HoldD;
+double l3FootAnim;
+
+/* shared */
+int  l3ModeTimer;
+int  l3HurtTicks;
+bool l3HasGun;
+int  l3FireCooldown;
+int  l3FireAnim;
+bool l3Song2Started;
+int  l3Hits[2];
+int  l3Score, l3CoinsTaken, l3Kills;
+double l3Fuel;
+int  l3Ticks;
+int  l3EndTimer;
+
+/* cheat code + deferred mute (M is also the first letter of the code) */
+static const char *L3_CHEAT = "MACHINEGUNON";
+int  l3CheatPos;
+int  l3PendingMute;
+
+/* one line of text in the middle of the screen */
+char l3Msg[96];
+int  l3MsgTicks;
+
+/* ==================== MUSIC ==================== */
+
+void playLevel03Music()
+{
+	musicPlay(MUSIC_L3_SONG1);
+}
+
+static void l3Message(const char *text, int ticks)
+{
+	strcpy_s(l3Msg, text);
+	l3MsgTicks = ticks;
+}
+
+/* ==================== LOADING ==================== */
+
+/*  Loads one picture and trims the empty transparent border, so a sprite
+    can be placed by its feet / wheels instead of by its padding.        */
+static bool l3LoadImg(L3Img *img, const char *path)
+{
+	int w, h, bpp, x, y;
+	int minX, minY, maxX, maxY, cw, ch;
+	unsigned char *data, *buf;
+
+	img->tex = 0;
+	img->w = 0;
+	img->h = 0;
+
+	data = stbi_load(path, &w, &h, &bpp, 4);
+	if (data == NULL)
+	{
+		printf("[level03] FAILED to load: %s\n", path);
+		return false;
+	}
+
+	minX = w; minY = h; maxX = -1; maxY = -1;
+	for (y = 0; y < h; y++)
+		for (x = 0; x < w; x++)
+			if (data[(y * w + x) * 4 + 3] > 20)
+			{
+				if (x < minX) minX = x;
+				if (x > maxX) maxX = x;
+				if (y < minY) minY = y;
+				if (y > maxY) maxY = y;
+			}
+
+	if (maxX < minX) { minX = 0; minY = 0; maxX = w - 1; maxY = h - 1; }
+
+	cw = maxX - minX + 1;
+	ch = maxY - minY + 1;
+
+	buf = (unsigned char *)malloc(cw * ch * 4);
+	if (buf == NULL) { stbi_image_free(data); return false; }
+
+	for (y = 0; y < ch; y++)
+		memcpy(buf + y * cw * 4, data + (((minY + y) * w) + minX) * 4, cw * 4);
+
+	glGenTextures(1, &img->tex);
+	glBindTexture(GL_TEXTURE_2D, img->tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, cw, ch, 0, GL_RGBA, GL_UNSIGNED_BYTE, buf);
+
+	free(buf);
+	stbi_image_free(data);
+
+	img->w = cw;
+	img->h = ch;
+	return true;
+}
+
+/*  Ramp 2: cropped like any sprite, then its top edge is measured column
+    by column out of the alpha channel so the wheels ride the drawn shape. */
+static bool l3LoadRamp(L3Ramp *r, const char *path, double drawW)
+{
+	int w, h, bpp, x, y, i, col, top;
+	int minX, minY, maxX, maxY, cw, ch;
+	unsigned char *data, *buf;
+
+	r->tex = 0;
+	r->w = drawW;
+	r->h = drawW * 0.5;
+	for (i = 0; i < L3_PROFILE_N; i++) r->prof[i] = 0;
+
+	data = stbi_load(path, &w, &h, &bpp, 4);
+	if (data == NULL)
+	{
+		printf("[level03] FAILED to load ramp: %s\n", path);
+		return false;
+	}
+
+	minX = w; minY = h; maxX = -1; maxY = -1;
+	for (y = 0; y < h; y++)
+		for (x = 0; x < w; x++)
+			if (data[(y * w + x) * 4 + 3] > 20)
+			{
+				if (x < minX) minX = x;
+				if (x > maxX) maxX = x;
+				if (y < minY) minY = y;
+				if (y > maxY) maxY = y;
+			}
+	if (maxX < minX) { minX = 0; minY = 0; maxX = w - 1; maxY = h - 1; }
+
+	cw = maxX - minX + 1;
+	ch = maxY - minY + 1;
+	r->h = drawW * ch / (double)cw;
+
+	for (i = 0; i < L3_PROFILE_N; i++)
+	{
+		col = minX + (int)((i + 0.5) * cw / L3_PROFILE_N);
+		if (col > maxX) col = maxX;
+
+		top = -1;
+		for (y = minY; y <= maxY; y++)
+			if (data[(y * w + col) * 4 + 3] > 60) { top = y; break; }
+
+		r->prof[i] = (top < 0) ? 0.0 : (maxY + 1 - top) * r->h / (double)ch;
+	}
+
+	/*  Ramp 2 only ever rises towards its lip. The gaps between the rails
+	    and the struts would read as dips and throw the Honda early, so
+	    the surface is made to climb steadily all the way to the top.     */
+	for (i = 1; i < L3_PROFILE_N; i++)
+		if (r->prof[i] < r->prof[i - 1])
+			r->prof[i] = r->prof[i - 1];
+
+	buf = (unsigned char *)malloc(cw * ch * 4);
+	if (buf == NULL) { stbi_image_free(data); return false; }
+	for (y = 0; y < ch; y++)
+		memcpy(buf + y * cw * 4, data + (((minY + y) * w) + minX) * 4, cw * 4);
+
+	glGenTextures(1, &r->tex);
+	glBindTexture(GL_TEXTURE_2D, r->tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, cw, ch, 0, GL_RGBA, GL_UNSIGNED_BYTE, buf);
+
+	free(buf);
+	stbi_image_free(data);
+	return true;
+}
+
+static void l3LoadSet(L3Img *arr, const char *fmt, int first, int count)
+{
+	char path[260];
+	int i;
+	for (i = 0; i < count; i++)
+	{
+		sprintf_s(path, fmt, first + i);
+		l3LoadImg(&arr[i], path);
+	}
+}
+
+void level03Init()
+{
+	int i;
+
+	for (i = 0; i < L3_BG_COUNT; i++)
+		l3BgTex[i] = loadImage(L3_BG_FILE[i]);
+
+	/* the Honda */
+	loadImageList(&l3Bike, L3_BIKE_FILE, 3);
+	l3BikeW = L3_BIKE_W;
+	if (l3Bike.frameW > 0)
+		l3BikeH = (int)((double)L3_BIKE_W * l3Bike.frameH / l3Bike.frameW + 0.5);
+	else
+		l3BikeH = 164;
+
+	l3LoadImg(&l3Loop45,   L3_DIR "45 degree loop.png");
+	l3LoadImg(&l3LoopUp,   L3_DIR "upper_vertical_during_loop.png");
+	l3LoadImg(&l3LoopTop,  L3_DIR "horizontal_1_during_loop.png");
+	l3LoadImg(&l3LoopDown, L3_DIR "downer_vertical_during_loop.png");
+
+	/*  The only picture that is not in the Level 3 folder: the Honda with
+	    nobody on it, needed once the rider walks away. Built from the
+	    supplied normal_riding.png and Rider_after_Getting down_3.png.   */
+	l3LoadImg(&l3Parked, L3_ART "Parked_bike.png");
+
+	l3LoadImg(&l3GetDown,    L3_DIR "Rider_Getting down_1.png");
+	l3LoadImg(&l3AfterDown2, L3_DIR "Rider_after_Getting down_2.png");
+	l3LoadImg(&l3AfterDown3, L3_DIR "Rider_after_Getting down_3.png");
+	l3LoadImg(&l3GetUp,      L3_DIR "Rider_Getting up_1.png");
+
+	/* the rider on foot */
+	l3LoadSet(l3Walk,      L3_DIR "rider_walking_pic%d.png",   1, 4);
+	l3LoadSet(l3Run,       L3_DIR "rider_running_pic%d.png",   1, 4);
+	l3LoadSet(l3WalkFire,  L3_DIR "Rider_walking_Firing%d.png", 1, 4);
+	l3LoadSet(l3StandFire, L3_DIR "Rider_stand_Firing%d.png",  1, 2);
+	l3LoadSet(l3Murdered,  L3_DIR "rider_murdered_pic%d.png",  1, 3);
+
+	/* robbers */
+	l3LoadSet(l3Rob1Walk, L3_DIR "Robber1_walkingpic%d.png", 1, 3);
+	l3LoadSet(l3Rob1Kill, L3_DIR "Robber1_killingpic%d.png", 1, 2);
+	l3LoadSet(l3Rob2Walk, L3_DIR "Robber2_walkingpic%d.png", 1, 2);
+	l3LoadSet(l3Rob2Kill, L3_DIR "Robber2_killingpic%d.png", 1, 2);
+	l3LoadSet(l3RobDead,  L3_DIR "Robber_deadpic%d.png",     1, 3);
+
+	/* vehicles - the supplied cars already face the Honda */
+	l3LoadImg(&l3CarArt[0], L3_DIR "Car_1.png");
+	l3LoadImg(&l3CarArt[1], L3_DIR "Car_2.png");
+	l3LoadImg(&l3CarArt[2], L3_DIR "Car_3.png");
+	l3LoadImg(&l3TankArt,   L3_DIR "tank.png");
+
+	/* ramps */
+	l3LoadImg(&l3LoopArt, L3_DIR "Loop_Ramp_1.png");
+	l3LoadRamp(&l3Ramp2,  L3_DIR "Ramp_2.png", L3_RAMP2_W);
+
+	/* one scale per character, so every frame of it has the same size */
+	l3FootScale = (l3Walk[0].h > 0)    ? L3_FOOT_H / l3Walk[0].h       : 0.46;
+	l3Rob1Scale = (l3Rob1Walk[0].h > 0) ? L3_ROBBER_H / l3Rob1Walk[0].h : 0.52;
+	l3Rob2Scale = (l3Rob2Walk[0].h > 0) ? L3_ROBBER_H / l3Rob2Walk[0].h : 0.55;
+}
+
+/* ==================== RAMP GEOMETRY ==================== */
+
+/*  Ramp 1 is a loop, so its top edge cannot be read from the alpha
+    channel (that would be the top of the circle). The deck the wheels
+    roll on was measured once off Loop_Ramp_1.png instead: x across the
+    cropped picture (0..1367) and y down from its top (0..637).          */
+#define L3_LOOP_SRC_W  1367.0
+#define L3_LOOP_SRC_H   637.0
+#define L3_LOOP_CX      691.0     /* centre of the circle, source pixels */
+#define L3_LOOP_CY      270.0
+#define L3_LOOP_R       187.5     /* inner running surface               */
+
+static const double L3_LOOP_DECK[][2] =
+{
+	{    0, 637 }, {   30, 622 }, {   50, 607 }, {  100, 579 }, {  150, 568 },
+	{  200, 561 }, {  250, 551 }, {  300, 540 }, {  350, 527 }, {  400, 516 },
+	{  450, 507 }, {  500, 500 }, {  550, 494 }, {  600, 481 }, {  650, 467 },
+	{  691, 459 }, {  740, 461 }, {  800, 468 }, {  850, 477 }, {  900, 487 },
+	{  950, 496 }, { 1000, 504 }, { 1050, 520 }, { 1100, 534 }, { 1150, 546 },
+	{ 1200, 555 }, { 1250, 562 }, { 1300, 587 }, { 1350, 614 }, { 1367, 637 }
+};
+static const int L3_LOOP_DECK_N = sizeof(L3_LOOP_DECK) / sizeof(L3_LOOP_DECK[0]);
+
+static double l3LoopH()          { return L3_LOOP_W * L3_LOOP_SRC_H / L3_LOOP_SRC_W; }
+static double l3LoopCenterX()    { return L3_LOOP_X + L3_LOOP_CX / L3_LOOP_SRC_W * L3_LOOP_W; }
+static double l3LoopCenterY()    { return L3_GROUND_Y + (L3_LOOP_SRC_H - L3_LOOP_CY) / L3_LOOP_SRC_H * l3LoopH(); }
+static double l3LoopRadius()     { return L3_LOOP_R / L3_LOOP_SRC_W * L3_LOOP_W; }
+
+/* bike centre travels this far from the loop centre */
+static double l3LoopPathRadius()
+{
+	double r = l3LoopRadius() - l3BikeH * 0.5;
+	return (r < 20.0) ? 20.0 : r;
+}
+
+static double l3LoopDeckAt(double worldX)
+{
+	double sx = (worldX - L3_LOOP_X) / L3_LOOP_W * L3_LOOP_SRC_W;
+	int i;
+
+	if (sx <= 0 || sx >= L3_LOOP_SRC_W) return 0.0;
+
+	for (i = 0; i < L3_LOOP_DECK_N - 1; i++)
+	{
+		if (sx >= L3_LOOP_DECK[i][0] && sx <= L3_LOOP_DECK[i + 1][0])
+		{
+			double t = (sx - L3_LOOP_DECK[i][0]) / (L3_LOOP_DECK[i + 1][0] - L3_LOOP_DECK[i][0]);
+			double y = L3_LOOP_DECK[i][1] + (L3_LOOP_DECK[i + 1][1] - L3_LOOP_DECK[i][1]) * t;
+			return (L3_LOOP_SRC_H - y) / L3_LOOP_SRC_H * l3LoopH();
+		}
+	}
+	return 0.0;
+}
+
+/*  Height of whatever is under this world x: the road, the loop deck or
+    Ramp 2. The same function carries the Honda and the rider on foot.   */
+double l3SurfaceAt(double worldX)
+{
+	double best = L3_GROUND_Y;
+	double h;
+
+	h = L3_GROUND_Y + l3LoopDeckAt(worldX);
+	if (h > best) best = h;
+
+	if (l3Ramp2.tex != 0 && worldX >= l3Ramp2.x && worldX <= l3Ramp2.x + l3Ramp2.w)
+	{
+		double t = (worldX - l3Ramp2.x) / l3Ramp2.w * (L3_PROFILE_N - 1);
+		int k = (int)t;
+		double frac;
+		if (k < 0) k = 0;
+		if (k > L3_PROFILE_N - 2) k = L3_PROFILE_N - 2;
+		frac = t - k;
+		h = L3_GROUND_Y + l3Ramp2.prof[k] + (l3Ramp2.prof[k + 1] - l3Ramp2.prof[k]) * frac;
+		if (h > best) best = h;
+	}
+	return best;
+}
+
+static bool l3OnLoopRamp(double worldX)
+{
+	return worldX > L3_LOOP_X - 10 && worldX < L3_LOOP_X + L3_LOOP_W + 10;
+}
+
+/* ==================== BUILDING THE ROUTE ==================== */
+
+#define L3_PI 3.14159265358979
+
+static void l3AddCoin(double x, double y, int artIndex)
+{
+	if (l3CoinCount >= L3_MAX_COINS) return;
+	if (artIndex < 0) artIndex = 0;
+	if (artIndex > 4) artIndex = 4;
+
+	l3Coins[l3CoinCount].x     = x;
+	l3Coins[l3CoinCount].y     = y;
+	l3Coins[l3CoinCount].art   = artIndex;
+	l3Coins[l3CoinCount].value = L2_COIN_VALUE[artIndex];
+	l3Coins[l3CoinCount].size  = 34.0 + artIndex * 5.0;
+	l3Coins[l3CoinCount].taken = false;
+	l3CoinCount++;
+}
+
+static void l3AddCoinRow(double x, double gap, int n, int artIndex, double y)
+{
+	int i;
+	for (i = 0; i < n; i++)
+		l3AddCoin(x + i * gap, y, artIndex);
+}
+
+static void l3AddRobber(int idx, double x, int group)
+{
+	L3Robber *r = &l3Robbers[idx];
+	r->x        = x;
+	r->type     = idx % 2;
+	r->group    = group;
+	r->state    = L3_ROB_SLEEP;
+	r->hp       = L3_ROBBER_HP;
+	r->timer    = 0;
+	r->cooldown = 0;
+	r->facing   = -1;
+	r->speed    = 1.3 + (idx % 3) * 0.25;
+	r->anim     = idx * 7.0;
+	r->struck   = false;
+	r->bumped   = false;
+	r->deadArt  = idx % 3;
+}
+
+static void l3AddTank(int idx, double x)
+{
+	l3Tanks[idx].x     = x;
+	l3Tanks[idx].awake = false;
+	l3Tanks[idx].alive = true;
+	l3Tanks[idx].gone  = false;
+	l3Tanks[idx].hp    = L3_TANK_HP;
+	l3Tanks[idx].flash = 0;
+}
+
+/*  Everything has a fixed place. Nothing is random, so every run of the
+    level is the same route.                                             */
+static void buildLevel03Track()
+{
+	int i, p;
+
+	l3CoinCount = 0;
+
+	/* ---- BG1 : the open road ---- */
+	l3AddCoinRow(L3_PANEL(0) +  600, 70, 6, 0, L3_GROUND_Y + 55);
+	l3AddCoinRow(L3_PANEL(0) + 1400, 70, 6, 0, L3_GROUND_Y + 105);
+	l3AddCoinRow(L3_PANEL(0) + 2200, 70, 5, 1, L3_GROUND_Y + 55);
+
+	/* ---- BG2 : Ramp 1 (loop) + cars - kept light so the cars read ---- */
+	l3AddCoinRow(L3_PANEL(1) + 1500, 80, 4, 1, L3_GROUND_Y + 55);
+	l3AddCoinRow(L3_PANEL(1) + 2350, 80, 3, 2, L3_GROUND_Y + 55);
+
+	/* ---- BG3 : Ramp 2 + cars ---- */
+	l3AddCoinRow(L3_PANEL(2) +  150, 80, 3, 1, L3_GROUND_Y + 55);
+	for (i = 0; i < 5; i++)                            /* over the launch */
+	{
+		double t = (i - 2) / 2.0;
+		l3AddCoin(L3_RAMP2_X + L3_RAMP2_W + 260 + t * 200, L3_GROUND_Y + 330 - t * t * 110, 3);
+	}
+	l3AddCoinRow(L3_PANEL(2) + 2300, 80, 4, 2, L3_GROUND_Y + 55);
+
+	/* ---- BG4 / BG5 : a few coins among the fighting ---- */
+	l3AddCoinRow(L3_PANEL(3) +  300, 75, 4, 1, L3_GROUND_Y + 55);
+	l3AddCoinRow(L3_PANEL(3) + 2000, 75, 3, 2, L3_GROUND_Y + 60);
+	l3AddCoinRow(L3_PANEL(4) +  850, 75, 3, 2, L3_GROUND_Y + 60);
+	l3AddCoinRow(L3_PANEL(4) + 1750, 75, 3, 2, L3_GROUND_Y + 60);
+	l3AddCoinRow(L3_PANEL(4) + 2600, 75, 3, 3, L3_GROUND_Y + 60);
+
+	/* ---- BG6 .. BG13 : open road, the coins grow in value ---- */
+	for (p = 5; p < L3_BG_COUNT - 1; p++)
+	{
+		int art = (p < 8) ? 1 : (p < 11) ? 2 : 3;
+		l3AddCoinRow(L3_PANEL(p) +  400, 72, 5, art - 1, L3_GROUND_Y + 55);
+		l3AddCoinRow(L3_PANEL(p) + 1300, 72, 5, art,     L3_GROUND_Y + 110);
+		l3AddCoinRow(L3_PANEL(p) + 2200, 72, 4, art,     L3_GROUND_Y + 55);
+	}
+	/* BG13: the last few, worth the most, just before the finish */
+	l3AddCoinRow(L3_PANEL(12) + 100, 90, 4, 4, L3_GROUND_Y + 80);
+
+	/* ---- fuel ---- */
+	{
+		static const double fuelX[L3_FUEL_COUNT] =
+		{
+			L3_PANEL(1) + 2000, L3_PANEL(2) + 2000, L3_PANEL(5) + 1200,
+			L3_PANEL(7) + 1200, L3_PANEL(9) + 1200, L3_PANEL(11) + 1200
+		};
+		for (i = 0; i < L3_FUEL_COUNT; i++)
+		{
+			l3Fuels[i].x     = fuelX[i];
+			l3Fuels[i].y     = L3_GROUND_Y + 30;
+			l3Fuels[i].taken = false;
+		}
+	}
+
+	/* ---- ramps ---- */
+	l3Ramp2.x = L3_RAMP2_X;
+
+	/* ---- the four oncoming cars: BG2 pair, then BG3 pair ---- */
+	for (i = 0; i < L3_CAR_COUNT; i++)
+	{
+		l3Cars[i].x      = 0;
+		l3Cars[i].art    = (i == 3) ? 0 : i;
+		l3Cars[i].state  = L3_CAR_WAITING;
+		l3Cars[i].delay  = (i % 2 == 0) ? 0 : L3_CAR_GAP_TICKS;
+		l3Cars[i].passed = false;
+	}
+
+	/* ---- BG4 : 6 robbers + 1 tank ---- */
+	for (i = 0; i < 6; i++)
+		l3AddRobber(i, L3_PANEL(3) + 2050 + i * 150, L3_GROUP_BG4);
+	l3AddTank(0, L3_PANEL(3) + 2650);
+
+	/* ---- BG5 : 15 robbers in three waves of five + 2 tanks ---- */
+	for (i = 0; i < 15; i++)
+	{
+		int wave = i / 5;
+		l3AddRobber(6 + i, L3_PANEL(4) + 600 + wave * 875 + (i % 5) * 110, L3_GROUP_BG5);
+	}
+	l3AddTank(1, L3_PANEL(4) + 1100);
+	l3AddTank(2, L3_PANEL(4) + 1950);
+}
+
+void level03Reset()
+{
+	int i;
+
+	l3State      = LEVEL03_PLAYING;
+	l3LoseReason = L3_LOSE_NONE;
+	l3Mode       = L3_MODE_BIKE;
+	l3Paused     = false;
+
+	l3Cam        = 0;
+	l3BikeX      = L3_SCREEN_X;
+	l3BikeY      = L3_GROUND_Y;
+	l3BikeVY     = 0;
+	l3Speed      = 0;
+	l3BikeAngle  = 0;
+	l3PrevGround = L3_GROUND_Y;
+	l3LastClimb  = 0;
+	l3OnGround   = true;
+	l3JumpRequested = false;
+	l3VoltTicks  = 0;
+
+	l3LoopPhi = 0; l3LoopEnergy = 0; l3LoopDir = 1;
+	l3LoopCleared  = false;
+	l3Ramp2Cleared = false;
+
+	l3FootX = 0; l3FootY = L3_GROUND_Y; l3FootVX = 0; l3FootVY = 0;
+	l3FootOnGround = true;
+	l3Facing = 1;
+	l3HoldD  = 0;
+	l3FootAnim = 0;
+
+	l3ModeTimer   = 0;
+	l3HurtTicks   = 0;
+	l3HasGun      = false;
+	l3FireCooldown = 0;
+	l3FireAnim    = 0;
+	l3Song2Started = false;
+	l3Hits[0] = 0;
+	l3Hits[1] = 0;
+	l3Score = 0; l3CoinsTaken = 0; l3Kills = 0;
+	l3Fuel  = L3_FUEL_MAX;
+	l3Ticks = 0;
+	l3EndTimer = 0;
+
+	l3CheatPos    = 0;
+	l3PendingMute = 0;
+	l3Msg[0]   = '\0';
+	l3MsgTicks = 0;
+
+	for (i = 0; i < L3_MAX_BULLETS; i++) l3Bullets[i].active = false;
+	for (i = 0; i < L3_MAX_BOOMS; i++)   l3Booms[i].active = false;
+
+	buildLevel03Track();
+	l3Message("LEVEL 3  -  RIDE!", 120);
+}
+
+/* ==================== SMALL HELPERS ==================== */
+
+static bool l3IsRiding()
+{
+	return l3Mode != L3_MODE_FOOT;
+}
+
+/* the box that gets hit - the Honda's or the rider's, never both */
+static void l3PlayerBox(double *x, double *y, double *w, double *h)
+{
+	if (l3Mode == L3_MODE_FOOT)
+	{
+		*x = l3FootX - 28;
+		*y = l3FootY;
+		*w = 56;
+		*h = L3_FOOT_H * 0.88;
+	}
+	else
+	{
+		*x = l3BikeX + l3BikeW * 0.15;
+		*y = l3BikeY + 6;
+		*w = l3BikeW * 0.70;
+		*h = l3BikeH * 0.62;
+	}
+}
+
+static double l3PlayerCX()   { return (l3Mode == L3_MODE_FOOT) ? l3FootX  : l3BikeX + l3BikeW * 0.5; }
+static double l3PlayerFeet() { return (l3Mode == L3_MODE_FOOT) ? l3FootY  : l3BikeY; }
+static double l3PlayerVY()   { return (l3Mode == L3_MODE_FOOT) ? l3FootVY : l3BikeVY; }
+
+static double l3CarH(int art)
+{
+	if (l3CarArt[art].w <= 0) return 100.0;
+	return L3_CAR_W * l3CarArt[art].h / (double)l3CarArt[art].w;
+}
+
+static double l3TankH()
+{
+	if (l3TankArt.w <= 0) return 130.0;
+	return L3_TANK_W * l3TankArt.h / (double)l3TankArt.w;
+}
+
+static void l3AddBoom(double x, double y)
+{
+	int i;
+	for (i = 0; i < L3_MAX_BOOMS; i++)
+	{
+		if (!l3Booms[i].active)
+		{
+			l3Booms[i].x = x;
+			l3Booms[i].y = y;
+			l3Booms[i].t = 0;
+			l3Booms[i].active = true;
+			return;
+		}
+	}
+}
+
+/*  The BG4 road block: the Honda cannot ride past this point while any
+    BG4 robber is still standing (and never while a car is on the road, so
+    the Honda is never trapped in front of one).                         */
+static bool l3GateClosed()
+{
+	int i;
+	for (i = 0; i < L3_CAR_COUNT; i++)
+		if (l3Cars[i].state == L3_CAR_DRIVING) return false;
+
+	for (i = 0; i < L3_ROBBER_COUNT; i++)
+		if (l3Robbers[i].group == L3_GROUP_BG4 && l3Robbers[i].state != L3_ROB_DEAD)
+			return true;
+	return false;
+}
+
+static void enterLevel03GameOver(int reason)
+{
+	if (l3State != LEVEL03_PLAYING) return;
+
+	l3State      = LEVEL03_GAMEOVER;
+	l3LoseReason = reason;
+	l3EndTimer   = 0;
+	musicStop();
+
+	if (reason == L3_LOSE_CAR || reason == L3_LOSE_TANK)
+	{
+		double bx, by, bw, bh;
+		l3PlayerBox(&bx, &by, &bw, &bh);
+		l3AddBoom(bx + bw * 0.5, by + bh * 0.5);
+		sfxPlay(SFX_BOMB);
+	}
+	else
+	{
+		sfxPlay(SFX_LOSE);
+	}
+}
+
+static void enterLevel03Win()
+{
+	if (l3State != LEVEL03_PLAYING) return;
+	l3State = LEVEL03_WIN;
+	musicStop();
+	sfxPlay(SFX_WIN);
+}
+
+/*  A robber landed a blow. Each fight counts its own hits: 3 in BG4 and
+    6 in BG5 end the run.                                                */
+static void l3RobberHit(int group, double fromX)
+{
+	if (l3HurtTicks > 0 || l3State != LEVEL03_PLAYING) return;
+
+	l3Hits[group]++;
+	l3HurtTicks = L3_HURT_TICKS;
+	sfxPlay(SFX_COLLISION);
+
+	if (l3Mode == L3_MODE_FOOT)
+		l3FootX += (l3FootX < fromX) ? -45.0 : 45.0;   /* knocked back */
+	else
+		l3Speed *= 0.4;
+
+	if (l3Hits[group] >= L3_GROUP_HIT_LIMIT[group])
+	{
+		l3Hits[group] = L3_GROUP_HIT_LIMIT[group];
+		enterLevel03GameOver(L3_LOSE_ROBBERS);
+	}
+}
+
+static void l3KillRobber(L3Robber *r)
+{
+	r->state = L3_ROB_DEAD;
+	l3Kills++;
+	l3Score += 50;
+}
+
+/* ==================== INPUT ==================== */
+
+/*  The cheat is typed on the keyboard, one letter at a time. M is also
+    the mute key, so a lone M waits a moment: if the next letter carries
+    on the code the mute is cancelled.                                   */
+static void l3CheatKey(char c)
+{
+	if (c == L3_CHEAT[l3CheatPos])
+		l3CheatPos++;
+	else
+		l3CheatPos = (c == L3_CHEAT[0]) ? 1 : 0;
+
+	if (c == 'M' && l3CheatPos == 1)
+		l3PendingMute = 22;
+
+	if (L3_CHEAT[l3CheatPos] == '\0')
+	{
+		l3CheatPos = 0;
+		if (!l3HasGun)
+		{
+			l3HasGun = true;
+			l3Message("MACHINE GUN ON  -  HOLD SPACE TO SHOOT", 200);
+			sfxPlay(SFX_FUEL);
+		}
+	}
+}
+
+/*  ENTER: off the Honda (from BG4 on) or back onto it (standing next to it). */
+static void l3ToggleBike()
+{
+	if (l3Mode == L3_MODE_BIKE)
+	{
+		if (l3BikeX < L3_DISMOUNT_FROM)
+		{
+			l3Message("KEEP RIDING  -  YOU GET OFF THE HONDA WHEN THE ROBBERS APPEAR", 120);
+			return;
+		}
+		if (!l3OnGround) return;
+
+		l3Mode      = L3_MODE_DISMOUNT;
+		l3ModeTimer = 0;
+		l3Speed     = 0;
+		l3VoltTicks = 0;
+		l3BikeAngle = 0;
+
+		/* the music changes the moment the rider leaves the bike */
+		if (!l3Song2Started)
+		{
+			l3Song2Started = true;
+			musicPlay(MUSIC_L3_SONG2);
+		}
+	}
+	else if (l3Mode == L3_MODE_FOOT)
+	{
+		double seat = l3BikeX + l3BikeW * L3_RIDER_ON_BIKE_X;
+
+		if (!l3FootOnGround) return;
+
+		if (fabs(l3FootX - seat) > L3_MOUNT_RANGE)
+		{
+			l3Message("WALK BACK TO YOUR HONDA, THEN PRESS ENTER", 100);
+			return;
+		}
+
+		l3Mode      = L3_MODE_MOUNT;
+		l3ModeTimer = 0;
+		l3FootX     = seat;
+		l3FootVX    = 0;
+		l3Facing    = 1;
+	}
+}
+
+/*  Edge-triggered keys, read once per fixed step before updateLevel03(). */
+void level03HandleInput()
+{
+	int c;
+
+	for (c = 'A'; c <= 'Z'; c++)
+		if (keyJustPressed((unsigned char)c) || keyJustPressed((unsigned char)(c + 32)))
+			l3CheatKey((char)c);
+
+	if (l3PendingMute > 0)
+	{
+		l3PendingMute--;
+		if (l3PendingMute == 0 && l3CheatPos <= 1)
+			musicToggleMute();
+	}
+
+	if (l3State != LEVEL03_PLAYING)
+		return;
+
+	if (keyJustPressed('p') || keyJustPressed('P'))
+		l3Paused = !l3Paused;
+
+	if (l3Paused)
+		return;
+
+	if ((keyJustPressed('v') || keyJustPressed('V')) &&
+	    (l3Mode == L3_MODE_BIKE || l3Mode == L3_MODE_LOOP))
+	{
+		l3VoltTicks = L3_VOLT_TICKS;
+		l3Message("VOLT SPEED!", 50);
+	}
+
+	if (keyJustPressed('w') || keyJustPressed('W') || specialKeyJustPressed(GLUT_KEY_UP))
+		l3JumpRequested = true;
+
+	if (keyJustPressed(KEY_ENTER))
+		l3ToggleBike();
+}
+
+/* ==================== THE HONDA ==================== */
+
+static void l3EnterLoop()
+{
+	l3Mode       = L3_MODE_LOOP;
+	l3LoopPhi    = -L3_PI / 2.0;              /* bottom of the circle */
+	l3LoopDir    = 1;
+	l3LoopEnergy = l3Speed * l3Speed;
+	l3BikeX      = l3LoopCenterX() - l3BikeW * 0.5;
+	l3BikeVY     = 0;
+	l3OnGround   = true;
+	l3BikeAngle  = 0;
+}
+
+static void l3LeaveLoopOnDeck()
+{
+	double rearX  = l3BikeX + l3BikeW * L3_WHEEL_REAR;
+	double frontX = l3BikeX + l3BikeW * L3_WHEEL_FRONT;
+	double g1 = l3SurfaceAt(rearX), g2 = l3SurfaceAt(frontX);
+
+	l3Mode       = L3_MODE_BIKE;
+	l3BikeY      = (g1 > g2) ? g1 : g2;
+	l3PrevGround = l3BikeY;
+	l3BikeVY     = 0;
+	l3OnGround   = true;
+	l3LastClimb  = 0;
+}
+
+/*  The loop is ridden with real energy: the Honda slows as it climbs and
+    only makes it over the top if it came in at L3_LOOP_MIN_SPEED or more,
+    which normal throttle cannot reach - VOLT SPEED can. Too slow and it
+    loses grip, slides back down and rolls back out of the loop.         */
+static void l3UpdateLoop()
+{
+	const double K = L3_LOOP_MIN_SPEED * L3_LOOP_MIN_SPEED / 5.0;   /* g * R */
+	double s = sin(l3LoopPhi);
+	double v2 = l3LoopEnergy - 2.0 * K * (1.0 + s);
+	double v;
+
+	if (l3VoltTicks > 0) l3VoltTicks--;
+
+	if (l3LoopDir > 0 && (v2 <= 1.0 || (s > 0 && v2 < K * s)))
+		l3LoopDir = -1;                       /* not enough speed */
+
+	v = sqrt((v2 > 1.0) ? v2 : 1.0);
+	l3LoopPhi += l3LoopDir * v / l3LoopPathRadius() * L3_LOOP_SPIN;
+
+	if (l3LoopDir > 0 && l3LoopPhi >= 1.5 * L3_PI)
+	{
+		/*  The loop uses the VOLT charge up: the Honda comes out at normal
+		    top speed, so the two oncoming cars still get two clean jumps. */
+		l3LeaveLoopOnDeck();
+		l3Speed     = L3_MAX_SPEED;
+		l3VoltTicks = 0;
+		if (!l3LoopCleared)
+		{
+			l3LoopCleared = true;
+			l3Score += 100;
+			l3Message("360 LOOP CLEARED!", 90);
+		}
+	}
+	else if (l3LoopDir < 0 && l3LoopPhi <= -L3_PI / 2.0)
+	{
+		l3LeaveLoopOnDeck();
+		l3Speed = -L3_REVERSE_MAX;
+		l3Message("NOT ENOUGH SPEED!  PRESS V FOR VOLT SPEED BEFORE THE LOOP", 170);
+	}
+}
+
+static void l3UpdateBike()
+{
+	double oldX, newX, rearX, frontX, gRear, gFront, ground, climb;
+	bool volt = (l3VoltTicks > 0);
+	bool gas   = keyHeld('d') || keyHeld('D') || specialKeyHeld(GLUT_KEY_RIGHT);
+	bool brake = keyHeld('a') || keyHeld('A') || specialKeyHeld(GLUT_KEY_LEFT);
+
+	if (volt) l3VoltTicks--;
+
+	/* ---- throttle / VOLT / brake + reverse ---- */
+	if (brake)
+		l3Speed -= L3_BRAKE;                      /* brakes, then rolls back */
+	else if (volt)
+		l3Speed += L3_VOLT_ACCEL;                 /* V pushes hard on its own */
+	else if (gas)
+	{
+		if (l3Speed < L3_MAX_SPEED) l3Speed += L3_ACCEL;
+	}
+	else if (l3Speed > 0)
+		l3Speed -= L3_COAST;
+	else if (l3Speed < 0)
+	{
+		l3Speed += L3_COAST * 4;
+		if (l3Speed > 0) l3Speed = 0;
+	}
+
+	if (volt)
+	{
+		if (l3Speed > L3_VOLT_MAX_SPEED) l3Speed = L3_VOLT_MAX_SPEED;
+	}
+	else if (l3Speed > L3_MAX_SPEED)
+	{
+		l3Speed -= L3_OVERSPEED_DECAY;            /* VOLT fades out smoothly */
+		if (l3Speed < L3_MAX_SPEED) l3Speed = L3_MAX_SPEED;
+	}
+	if (l3Speed < -L3_REVERSE_MAX) l3Speed = -L3_REVERSE_MAX;
+
+	/* ---- the BG4 road block (only stops a Honda that is still in front of it) ---- */
+	if (l3Speed > 0 && l3BikeX + l3BikeW * 0.95 <= L3_GATE_X &&
+	    l3BikeX + l3BikeW * 0.95 + l3Speed > L3_GATE_X && l3GateClosed())
+	{
+		l3BikeX = L3_GATE_X - l3BikeW * 0.95;
+		l3Speed = 0;
+	}
+
+	/* ---- move, unless the surface ahead is a wall ---- */
+	oldX = l3BikeX;
+	newX = oldX + l3Speed;
+	if (newX < 0) { newX = 0; l3Speed = 0; }
+	if (newX > L3_FINISH_X + 200) { newX = L3_FINISH_X + 200; l3Speed = 0; }
+
+	if (l3OnGround)
+	{
+		double a = l3SurfaceAt(newX + l3BikeW * L3_WHEEL_REAR);
+		double b = l3SurfaceAt(newX + l3BikeW * L3_WHEEL_FRONT);
+		double gNew = (a > b) ? a : b;
+		if (gNew - l3PrevGround > L3_WALL_STEP)
+		{
+			newX = oldX;
+			l3Speed = 0;
+		}
+	}
+	l3BikeX = newX;
+
+	/* ---- reaching the bottom of the loop, moving forward ---- */
+	{
+		double c0 = oldX + l3BikeW * 0.5, c1 = newX + l3BikeW * 0.5, lc = l3LoopCenterX();
+		if (l3Speed > 0 && c0 < lc && c1 >= lc)
+		{
+			l3EnterLoop();
+			return;
+		}
+	}
+
+	/* ---- the two tyres and what is under them ---- */
+	rearX  = l3BikeX + l3BikeW * L3_WHEEL_REAR;
+	frontX = l3BikeX + l3BikeW * L3_WHEEL_FRONT;
+	gRear  = l3SurfaceAt(rearX);
+	gFront = l3SurfaceAt(frontX);
+	ground = (gRear > gFront) ? gRear : gFront;
+
+	climb = ground - l3PrevGround;
+	l3PrevGround = ground;
+
+	/* ---- W jumps (never on the loop ramp - the loop has to be ridden) ---- */
+	if (l3JumpRequested && l3OnGround && !l3OnLoopRamp(l3BikeX + l3BikeW * 0.5))
+	{
+		double room = L3_CEILING_Y - l3BikeY;
+		double v = L3_JUMP_VELOCITY;
+		if (room > 0 && v > sqrt(2.0 * L3_GRAVITY * room)) v = sqrt(2.0 * L3_GRAVITY * room);
+		l3BikeVY   = v;
+		l3OnGround = false;
+	}
+	l3JumpRequested = false;
+
+	if (l3OnGround)
+	{
+		l3BikeY  = ground;
+		l3BikeVY = 0;
+
+		if (climb > 0.4)
+			l3LastClimb = climb;
+
+		/* past the top of Ramp 2 the surface drops away: launch */
+		if (climb < -1.0 && l3Speed > 1.0 && l3LastClimb > 0.4)
+		{
+			double gain = L3_LAUNCH_MIN_GAIN + L3_LAUNCH_SPEED_GAIN * (l3Speed / L3_MAX_SPEED);
+			double v    = l3LastClimb * L3_RAMP_LAUNCH * gain;
+			double room = L3_CEILING_Y - l3BikeY;
+			if (room > 0 && v > sqrt(2.0 * L3_GRAVITY * room)) v = sqrt(2.0 * L3_GRAVITY * room);
+			l3BikeVY    = v;
+			l3OnGround  = false;
+			l3LastClimb = 0;
+		}
+		else if (climb >= -1.0 && climb <= 0.4)
+		{
+			l3LastClimb *= 0.90;
+		}
+	}
+	else
+	{
+		l3BikeVY -= L3_GRAVITY;
+		if (keyHeld('s') || keyHeld('S') || specialKeyHeld(GLUT_KEY_DOWN))
+			l3BikeVY -= L3_FAST_FALL;             /* S drops it much faster */
+
+		l3BikeY += l3BikeVY;
+
+		if (l3BikeY > L3_CEILING_Y)
+		{
+			l3BikeY = L3_CEILING_Y;
+			if (l3BikeVY > 0) l3BikeVY = 0;
+		}
+
+		if (l3BikeY <= ground)
+		{
+			l3BikeY     = ground;
+			l3BikeVY    = 0;
+			l3OnGround  = true;
+			l3LastClimb = 0;
+		}
+	}
+
+	/* ---- lie along the slope so both tyres touch; level out in the air ---- */
+	{
+		double span   = l3BikeW * (L3_WHEEL_FRONT - L3_WHEEL_REAR);
+		double target = 0;
+
+		if (l3OnGround && span > 1.0)
+		{
+			target = atan2(gFront - gRear, span) * 180.0 / L3_PI;
+			if (target >  32.0) target =  32.0;
+			if (target < -32.0) target = -32.0;
+		}
+		l3BikeAngle += (target - l3BikeAngle) * (l3OnGround ? 0.35 : 0.08);
+	}
+
+	/* ---- Ramp 2 is behind the Honda: the BG3 cars may come ---- */
+	if (!l3Ramp2Cleared && l3BikeX + l3BikeW * L3_WHEEL_REAR > l3Ramp2.x + l3Ramp2.w)
+		l3Ramp2Cleared = true;
+}
+
+/* ==================== THE RIDER ON FOOT ==================== */
+
+static void l3UpdateFoot()
+{
+	bool right = keyHeld('d') || keyHeld('D') || specialKeyHeld(GLUT_KEY_RIGHT);
+	bool left  = keyHeld('a') || keyHeld('A') || specialKeyHeld(GLUT_KEY_LEFT);
+	double target = 0, ground;
+
+	/* D walks, D held runs; A stops, A held walks back */
+	if (right && !left)
+	{
+		l3HoldD++;
+		target   = (l3HoldD > L3_RUN_AFTER_TICKS) ? L3_FOOT_RUN : L3_FOOT_WALK;
+		l3Facing = 1;
+	}
+	else
+	{
+		l3HoldD = 0;
+		if (left)
+		{
+			target   = -L3_FOOT_BACK;
+			l3Facing = -1;
+		}
+	}
+
+	if (l3FootVX < target)
+	{
+		l3FootVX += L3_FOOT_ACCEL;
+		if (l3FootVX > target) l3FootVX = target;
+	}
+	else if (l3FootVX > target)
+	{
+		l3FootVX -= L3_FOOT_ACCEL * 1.5;
+		if (l3FootVX < target) l3FootVX = target;
+	}
+
+	l3FootX += l3FootVX;
+	if (l3FootX < 40) { l3FootX = 40; l3FootVX = 0; }
+	if (l3FootX > L3_FINISH_X + 200) l3FootX = L3_FINISH_X + 200;
+
+	/* W jumps, S brings him down fast */
+	if (l3JumpRequested && l3FootOnGround)
+	{
+		l3FootVY = L3_FOOT_JUMP;
+		l3FootOnGround = false;
+	}
+	l3JumpRequested = false;
+
+	ground = l3SurfaceAt(l3FootX);
+
+	if (l3FootOnGround)
+	{
+		if (ground < l3FootY - 2.0)
+			l3FootOnGround = false;           /* walked off an edge */
+		else
+		{
+			l3FootY  = ground;
+			l3FootVY = 0;
+		}
+	}
+
+	if (!l3FootOnGround)
+	{
+		l3FootVY -= L3_GRAVITY;
+		if (keyHeld('s') || keyHeld('S') || specialKeyHeld(GLUT_KEY_DOWN))
+			l3FootVY -= L3_FOOT_FAST_FALL;
+		l3FootY += l3FootVY;
+
+		if (l3FootY <= ground)
+		{
+			l3FootY  = ground;
+			l3FootVY = 0;
+			l3FootOnGround = true;
+		}
+	}
+
+	l3FootAnim += fabs(l3FootVX);
+}
+
+/* getting off / on - fixed length animations, no control meanwhile */
+#define L3_DISMOUNT_TICKS 42
+#define L3_MOUNT_TICKS    18
+
+static void l3UpdateModeAnimation()
+{
+	l3ModeTimer++;
+
+	if (l3Mode == L3_MODE_DISMOUNT && l3ModeTimer >= L3_DISMOUNT_TICKS)
+	{
+		l3Mode   = L3_MODE_FOOT;
+		l3FootX  = l3BikeX + l3BikeW * L3_RIDER_ON_BIKE_X;
+		l3FootY  = l3BikeY;
+		l3FootVX = 0;
+		l3FootVY = 0;
+		l3FootOnGround = true;
+		l3Facing = 1;
+		l3HoldD  = 0;
+	}
+	else if (l3Mode == L3_MODE_MOUNT && l3ModeTimer >= L3_MOUNT_TICKS)
+	{
+		l3Mode      = L3_MODE_BIKE;
+		l3Speed     = 0;
+		l3BikeVY    = 0;
+		l3OnGround  = true;
+		l3LastClimb = 0;
+		{
+			double a = l3SurfaceAt(l3BikeX + l3BikeW * L3_WHEEL_REAR);
+			double b = l3SurfaceAt(l3BikeX + l3BikeW * L3_WHEEL_FRONT);
+			l3BikeY = (a > b) ? a : b;
+			l3PrevGround = l3BikeY;
+		}
+	}
+}
+
+/* ==================== CAMERA ==================== */
+
+static void l3UpdateCamera()
+{
+	double target;
+
+	if (l3Mode == L3_MODE_LOOP)
+		return;                                   /* the loop is drawn in place */
+
+	if (l3Mode == L3_MODE_FOOT)
+		target = l3FootX - (L3_SCREEN_X + l3BikeW * L3_RIDER_ON_BIKE_X);
+	else
+		target = l3BikeX - L3_SCREEN_X;
+
+	/* snap while riding, glide only after a big jump (getting back on) */
+	if (fabs(target - l3Cam) < 60.0)
+		l3Cam = target;
+	else
+		l3Cam += (target - l3Cam) * 0.35;
+
+	if (l3Cam < 0) l3Cam = 0;
+	if (l3Cam > L3_ROUTE_END) l3Cam = L3_ROUTE_END;
+}
+
+/* ==================== CARS ==================== */
+
+/*  Four oncoming cars, one at a time. Car 1 of BG2 appears once the loop
+    is cleared, car 2 only after car 1 is behind the Honda plus a pause,
+    so there are always two separate jumps with room to recover between
+    them. BG3's pair works the same way after Ramp 2.                    */
+static void l3UpdateCars()
+{
+	double bx, by, bw, bh;
+	int i;
+
+	l3PlayerBox(&bx, &by, &bw, &bh);
+
+	for (i = 0; i < L3_CAR_COUNT; i++)
+	{
+		L3Car *c = &l3Cars[i];
+
+		if (c->state == L3_CAR_WAITING)
+		{
+			bool ready;
+
+			/*  The first car of a pair waits until the Honda is back on the
+			    road after its ramp, so it never lands on top of a car.   */
+			bool landed = (l3Mode == L3_MODE_BIKE && l3OnGround);
+
+			if (i == 0)
+				ready = l3LoopCleared && landed &&
+				        l3BikeX > L3_LOOP_X + L3_LOOP_W - l3BikeW * 0.5;
+			else if (i == 2)
+				ready = l3Ramp2Cleared && landed &&
+				        (l3Cars[1].passed || l3Cars[1].state == L3_CAR_DONE);
+			else
+				ready = l3Cars[i - 1].passed || l3Cars[i - 1].state == L3_CAR_DONE;
+
+			/* never start a car once the Honda is deep into the fights */
+			if (l3PlayerCX() > L3_PANEL(3) + 1500)
+			{
+				c->state  = L3_CAR_DONE;
+				c->passed = true;
+				continue;
+			}
+
+			if (ready)
+			{
+				if (c->delay > 0)
+					c->delay--;
+				else
+				{
+					c->state = L3_CAR_DRIVING;
+					c->x     = l3Cam + SCREEN_WIDTH + 10;   /* just off screen, ahead */
+				}
+			}
+		}
+		else if (c->state == L3_CAR_DRIVING)
+		{
+			double h = l3CarH(c->art);
+
+			c->x -= L3_CAR_SPEED;
+
+			if (l3Mode != L3_MODE_LOOP &&
+			    rectsOverlap(bx, by, bw, bh,
+			                 c->x + L3_CAR_W * 0.06, L3_GROUND_Y, L3_CAR_W * 0.88, h * 0.80))
+			{
+				enterLevel03GameOver(L3_LOSE_CAR);
+				return;
+			}
+
+			if (!c->passed && c->x + L3_CAR_W < bx)
+				c->passed = true;
+
+			if (c->x + L3_CAR_W < l3Cam - 300)
+			{
+				c->state  = L3_CAR_DONE;
+				c->passed = true;
+			}
+		}
+	}
+}
+
+/* ==================== ROBBERS ==================== */
+
+static void l3UpdateRobbers()
+{
+	double bx, by, bw, bh;
+	double px   = l3PlayerCX();
+	double feet = l3PlayerFeet();
+	double vy   = l3PlayerVY();
+	bool   bg4WasBlocked = l3GateClosed();
+	int i;
+
+	l3PlayerBox(&bx, &by, &bw, &bh);
+
+	for (i = 0; i < L3_ROBBER_COUNT; i++)
+	{
+		L3Robber *r = &l3Robbers[i];
+		double dx, top;
+		bool reachable;
+
+		if (r->state == L3_ROB_DEAD) continue;
+
+		if (r->state == L3_ROB_SLEEP)
+		{
+			if (r->x - px < L3_ROBBER_WAKE && r->x - px > -400)
+				r->state = L3_ROB_WALK;
+			else
+				continue;
+		}
+
+		if (r->cooldown > 0) r->cooldown--;
+
+		dx = px - r->x;
+		r->facing = (dx < 0) ? -1 : 1;
+		top = L3_GROUND_Y + L3_ROBBER_H * 0.90;
+
+		/* jumping onto a robber's head takes him down (no gun needed) */
+		if (vy < -1.0 && feet <= top + 45 && feet >= top - 25 &&
+		    bx < r->x + 30 && bx + bw > r->x - 30)
+		{
+			l3KillRobber(r);
+			if (l3Mode == L3_MODE_FOOT) l3FootVY = 10.0;
+			else                        l3BikeVY = 10.0;
+			continue;
+		}
+
+		reachable = (feet < L3_GROUND_Y + 95);
+
+		if (r->state == L3_ROB_ATTACK)
+		{
+			r->timer++;
+			if (r->timer == 14 && !r->struck)             /* the swing lands */
+			{
+				r->struck = true;
+				if (fabs(dx) < L3_ROBBER_REACH + 15 && reachable)
+					l3RobberHit(r->group, r->x);
+				if (l3State != LEVEL03_PLAYING) return;
+			}
+			if (r->timer >= 30)
+			{
+				r->state    = L3_ROB_WALK;
+				r->cooldown = 40;
+			}
+		}
+		else
+		{
+			if (fabs(dx) < L3_ROBBER_REACH && r->cooldown == 0 && reachable)
+			{
+				r->state  = L3_ROB_ATTACK;
+				r->timer  = 0;
+				r->struck = false;
+			}
+			else if (fabs(dx) > 60)
+			{
+				r->x    += r->facing * r->speed;
+				r->anim += r->speed;
+			}
+		}
+
+		/* riding into a robber: he gets a blow in, the Honda loses speed */
+		if (l3Mode == L3_MODE_BIKE && fabs(l3Speed) > 3.0 && !r->bumped &&
+		    rectsOverlap(bx, by, bw, bh, r->x - 32, L3_GROUND_Y, 64, L3_ROBBER_H * 0.9))
+		{
+			r->bumped = true;
+			l3RobberHit(r->group, r->x);
+			if (l3State != LEVEL03_PLAYING) return;
+		}
+	}
+
+	if (bg4WasBlocked && !l3GateClosed())
+		l3Message("ROAD CLEAR!  GET BACK ON THE HONDA (ENTER) AND RIDE ON", 200);
+}
+
+/* ==================== TANKS ==================== */
+
+static void l3UpdateTanks()
+{
+	double bx, by, bw, bh, th = l3TankH();
+	double px = l3PlayerCX();
+	int i;
+
+	l3PlayerBox(&bx, &by, &bw, &bh);
+
+	for (i = 0; i < L3_TANK_COUNT; i++)
+	{
+		L3Tank *t = &l3Tanks[i];
+
+		if (t->gone || !t->alive) continue;
+
+		if (!t->awake)
+		{
+			if (t->x - px < L3_TANK_WAKE) t->awake = true;
+			else continue;
+		}
+
+		t->x -= L3_TANK_SPEED;
+		if (t->flash > 0) t->flash--;
+
+		if (rectsOverlap(bx, by, bw, bh,
+		                 t->x + L3_TANK_W * 0.14, L3_GROUND_Y, L3_TANK_W * 0.72, th * 0.70))
+		{
+			enterLevel03GameOver(L3_LOSE_TANK);
+			return;
+		}
+
+		if (t->x + L3_TANK_W < l3Cam - 400)
+			t->gone = true;
+	}
+}
+
+/* ==================== SHOOTING ==================== */
+
+static void l3UpdateShooting()
+{
+	int i;
+
+	if (l3FireCooldown > 0) l3FireCooldown--;
+	if (l3FireAnim > 0)     l3FireAnim--;
+
+	if (!l3HasGun || !keyHeld(' ')) return;
+	if (l3Mode != L3_MODE_FOOT && l3Mode != L3_MODE_BIKE) return;
+	if (l3FireCooldown > 0) return;
+
+	for (i = 0; i < L3_MAX_BULLETS; i++)
+	{
+		if (l3Bullets[i].active) continue;
+
+		if (l3Mode == L3_MODE_FOOT)
+		{
+			l3Bullets[i].vx = L3_BULLET_SPEED * l3Facing;
+			l3Bullets[i].x  = l3FootX + l3Facing * 62.0;
+			l3Bullets[i].y  = l3FootY + L3_FOOT_H * 0.60;
+		}
+		else
+		{
+			l3Bullets[i].vx = L3_BULLET_SPEED;
+			l3Bullets[i].x  = l3BikeX + l3BikeW * 0.95;
+			l3Bullets[i].y  = l3BikeY + l3BikeH * 0.62;
+		}
+		l3Bullets[i].life   = L3_BULLET_LIFE;
+		l3Bullets[i].active = true;
+		break;
+	}
+
+	l3FireCooldown = L3_FIRE_EVERY;
+	l3FireAnim     = 8;
+}
+
+static void l3UpdateBullets()
+{
+	double th = l3TankH();
+	int i, k;
+
+	for (i = 0; i < L3_MAX_BULLETS; i++)
+	{
+		L3Bullet *b = &l3Bullets[i];
+		if (!b->active) continue;
+
+		b->x += b->vx;
+		if (--b->life <= 0 || b->x < l3Cam - 100 || b->x > l3Cam + SCREEN_WIDTH + 100)
+		{
+			b->active = false;
+			continue;
+		}
+
+		for (k = 0; k < L3_ROBBER_COUNT && b->active; k++)
+		{
+			L3Robber *r = &l3Robbers[k];
+			if (r->state == L3_ROB_DEAD) continue;
+			if (b->x > r->x - 32 && b->x < r->x + 32 &&
+			    b->y > L3_GROUND_Y && b->y < L3_GROUND_Y + L3_ROBBER_H * 0.95)
+			{
+				b->active = false;
+				if (r->state == L3_ROB_SLEEP) r->state = L3_ROB_WALK;
+				if (--r->hp <= 0)
+					l3KillRobber(r);
+			}
+		}
+
+		for (k = 0; k < L3_TANK_COUNT && b->active; k++)
+		{
+			L3Tank *t = &l3Tanks[k];
+			if (!t->alive || t->gone) continue;
+			if (b->x > t->x + L3_TANK_W * 0.05 && b->x < t->x + L3_TANK_W * 0.95 &&
+			    b->y > L3_GROUND_Y && b->y < L3_GROUND_Y + th * 0.85)
+			{
+				b->active = false;
+				t->awake  = true;
+				t->flash  = 4;
+				if (--t->hp <= 0)
+				{
+					t->alive = false;
+					l3Score += 200;
+					l3AddBoom(t->x + L3_TANK_W * 0.5, L3_GROUND_Y + th * 0.5);
+					sfxPlay(SFX_BOMB);
+				}
+			}
+		}
+	}
+}
+
+/* ==================== PICKUPS, FUEL, FINISH ==================== */
+
+static void l3UpdatePickups()
+{
+	double bx, by, bw, bh;
+	int i;
+
+	l3PlayerBox(&bx, &by, &bw, &bh);
+
+	for (i = 0; i < l3CoinCount; i++)
+	{
+		double s;
+		if (l3Coins[i].taken) continue;
+		s = l3Coins[i].size;
+		if (rectsOverlap(bx, by, bw, bh, l3Coins[i].x - s / 2, l3Coins[i].y - s / 2, s, s))
+		{
+			l3Coins[i].taken = true;
+			l3Score += l3Coins[i].value;
+			l3CoinsTaken++;
+			sfxPlay(SFX_COIN);
+		}
+	}
+
+	for (i = 0; i < L3_FUEL_COUNT; i++)
+	{
+		if (l3Fuels[i].taken) continue;
+		if (rectsOverlap(bx, by, bw, bh, l3Fuels[i].x, l3Fuels[i].y, 52, 56))
+		{
+			l3Fuels[i].taken = true;
+			l3Fuel += L3_FUEL_PICKUP;
+			if (l3Fuel > L3_FUEL_MAX) l3Fuel = L3_FUEL_MAX;
+			sfxPlay(SFX_FUEL);
+		}
+	}
+}
+
+static void l3UpdateFuel()
+{
+	/* only the running Honda burns fuel - walking is free */
+	if ((l3Mode == L3_MODE_BIKE || l3Mode == L3_MODE_LOOP) && fabs(l3Speed) > 0.05)
+		l3Fuel -= (l3VoltTicks > 0) ? L3_FUEL_VOLT_DRAIN : L3_FUEL_DRAIN;
+
+	if (l3Fuel <= 0)
+	{
+		l3Fuel = 0;
+		enterLevel03GameOver(L3_LOSE_FUEL);
+	}
+}
+
+static void l3CheckFinish()
+{
+	if (l3PlayerCX() >= L3_FINISH_X)
+		enterLevel03Win();
+}
+
+/* ==================== THE LEVEL STEP ==================== */
+
+void updateLevel03()
+{
+	int i;
+
+	for (i = 0; i < L3_MAX_BOOMS; i++)
+		if (l3Booms[i].active && ++l3Booms[i].t > 45)
+			l3Booms[i].active = false;
+
+	if (l3MsgTicks > 0) l3MsgTicks--;
+
+	if (l3State != LEVEL03_PLAYING)
+	{
+		l3EndTimer++;
+		return;
+	}
+	if (l3Paused)
+		return;
+
+	l3Ticks++;
+	if (l3HurtTicks > 0) l3HurtTicks--;
+
+	switch (l3Mode)
+	{
+	case L3_MODE_BIKE:     l3UpdateBike();          break;
+	case L3_MODE_LOOP:     l3UpdateLoop();          break;
+	case L3_MODE_FOOT:     l3UpdateFoot();          break;
+	case L3_MODE_DISMOUNT:
+	case L3_MODE_MOUNT:    l3UpdateModeAnimation(); break;
+	}
+	l3JumpRequested = false;
+
+	l3UpdateCamera();
+
+	l3UpdateShooting();
+	l3UpdateBullets();
+
+	if (l3Mode != L3_MODE_LOOP)
+	{
+		l3UpdateCars();
+		if (l3State != LEVEL03_PLAYING) return;
+
+		l3UpdateRobbers();
+		if (l3State != LEVEL03_PLAYING) return;
+
+		l3UpdateTanks();
+		if (l3State != LEVEL03_PLAYING) return;
+
+		l3UpdatePickups();
+	}
+
+	l3UpdateFuel();
+	if (l3State != LEVEL03_PLAYING) return;
+
+	l3CheckFinish();
+}
+
+/* ==================== DRAWING ==================== */
+
+int level03BackgroundIndex()
+{
+	int i = (int)((l3Cam * L3_BG_PARALLAX) / SCREEN_WIDTH);
+	if (i < 0) i = 0;
+	if (i > L3_BG_COUNT - 1) i = L3_BG_COUNT - 1;
+	return i;
+}
+
+/* draws a cropped sprite standing on (cx, y); flip mirrors it */
+static void l3DrawImg(const L3Img *img, double cx, double y, double scale, bool flip)
+{
+	int w, h, x;
+	if (img->tex == 0) return;
+
+	w = (int)(img->w * scale + 0.5);
+	h = (int)(img->h * scale + 0.5);
+	x = (int)(cx - w / 2.0);
+
+	iSetColor(255, 255, 255);
+	if (flip)
+		iShowImage(x + w, (int)y, -w, h, img->tex);
+	else
+		iShowImage(x, (int)y, w, h, img->tex);
+}
+
+/* draws a sprite centred on (cx, cy), turned by deg */
+static void l3DrawImgTurned(unsigned int tex, double w, double h, double cx, double cy, double deg)
+{
+	if (tex == 0) return;
+	iSetColor(255, 255, 255);
+	iRotate(cx, cy, deg);
+	iShowImage((int)(cx - w / 2.0), (int)(cy - h / 2.0), (int)w, (int)h, tex);
+	iUnRotate();
+}
+
+static void l3DrawBackgrounds()
+{
+	double slide = l3Cam * L3_BG_PARALLAX;
+	int i;
+
+	iSetColor(255, 255, 255);
+	for (i = 0; i < L3_BG_COUNT; i++)
+	{
+		double sx = i * (double)SCREEN_WIDTH - slide;
+		if (sx >= SCREEN_WIDTH) break;
+		if (sx + SCREEN_WIDTH <= 0) continue;
+		iShowImage((int)sx, L3_BG_Y_OFFSET, SCREEN_WIDTH, SCREEN_HEIGHT, l3BgTex[i]);
+	}
+}
+
+static void l3DrawRoad()
+{
+	double period = 130.0, dashW = 74.0, x, off;
+
+	iSetColor(56, 56, 60);
+	iFilledRectangle(0, 0, SCREEN_WIDTH, L3_GROUND_Y);
+	iSetColor(44, 44, 48);
+	iFilledRectangle(0, 0, SCREEN_WIDTH, L3_GROUND_Y * 0.42);
+
+	iSetColor(96, 96, 102);
+	iFilledRectangle(0, L3_GROUND_Y - 8, SCREEN_WIDTH, 8);
+	iSetColor(COL_RED_R, COL_RED_G, COL_RED_B);
+	iFilledRectangle(0, L3_GROUND_Y - 2, SCREEN_WIDTH, 2);
+
+	iSetColor(150, 150, 148);
+	iFilledRectangle(0, L3_GROUND_Y - 22, SCREEN_WIDTH, 3);
+
+	off = l3Cam - floor(l3Cam / period) * period;
+	for (x = -off; x < SCREEN_WIDTH; x += period)
+	{
+		iSetColor(205, 205, 195);
+		iFilledRectangle(x, L3_GROUND_Y * 0.40, dashW, 6);
+	}
+}
+
+static void l3DrawRamps()
+{
+	double sx;
+
+	sx = L3_LOOP_X - l3Cam;
+	if (sx < SCREEN_WIDTH && sx + L3_LOOP_W > 0 && l3LoopArt.tex != 0)
+	{
+		iSetColor(255, 255, 255);
+		iShowImage((int)sx, (int)L3_GROUND_Y, (int)L3_LOOP_W, (int)l3LoopH(), l3LoopArt.tex);
+	}
+
+	sx = l3Ramp2.x - l3Cam;
+	if (sx < SCREEN_WIDTH && sx + l3Ramp2.w > 0 && l3Ramp2.tex != 0)
+	{
+		iSetColor(255, 255, 255);
+		iShowImage((int)sx, (int)L3_GROUND_Y, (int)l3Ramp2.w, (int)l3Ramp2.h, l3Ramp2.tex);
+	}
+}
+
+static void l3DrawPickups()
+{
+	int i;
+	double sx;
+
+	for (i = 0; i < L3_FUEL_COUNT; i++)
+	{
+		if (l3Fuels[i].taken) continue;
+		sx = l3Fuels[i].x - l3Cam;
+		if (sx > SCREEN_WIDTH + 60 || sx < -60) continue;
+		iSetColor(255, 255, 255);
+		iShowImage((int)sx, (int)(l3Fuels[i].y + sin((l3Ticks + i * 20) * 0.05) * 5.0),
+		           52, 56, l2FuelTex);
+	}
+
+	for (i = 0; i < l3CoinCount; i++)
+	{
+		double s;
+		if (l3Coins[i].taken) continue;
+		sx = l3Coins[i].x - l3Cam;
+		if (sx > SCREEN_WIDTH + 60 || sx < -60) continue;
+		s = l3Coins[i].size;
+		iSetColor(255, 255, 255);
+		iShowImage((int)(sx - s / 2),
+		           (int)(l3Coins[i].y - s / 2 + sin((l3Ticks + i * 12) * 0.06) * 4.0),
+		           (int)s, (int)s, l2CoinTex[l3Coins[i].art]);
+	}
+}
+
+static void l3DrawDeadRobbers()
+{
+	int i;
+	for (i = 0; i < L3_ROBBER_COUNT; i++)
+	{
+		L3Robber *r = &l3Robbers[i];
+		double sx = r->x - l3Cam;
+		if (r->state != L3_ROB_DEAD) continue;
+		if (sx < -250 || sx > SCREEN_WIDTH + 250) continue;
+		/* the supplied blood / dead body sprite, left on the road */
+		l3DrawImg(&l3RobDead[r->deadArt], sx, L3_GROUND_Y - 6, l3Rob1Scale * 0.95, false);
+	}
+}
+
+static void l3DrawRobbers()
+{
+	int i;
+	for (i = 0; i < L3_ROBBER_COUNT; i++)
+	{
+		L3Robber *r = &l3Robbers[i];
+		double sx = r->x - l3Cam;
+		const L3Img *img;
+		double scale;
+		bool flip = (r->facing > 0);           /* the art faces left */
+
+		if (r->state == L3_ROB_DEAD) continue;
+		if (sx < -200 || sx > SCREEN_WIDTH + 200) continue;
+
+		if (r->type == 0)
+		{
+			scale = l3Rob1Scale;
+			if (r->state == L3_ROB_ATTACK) img = &l3Rob1Kill[(r->timer < 14) ? 0 : 1];
+			else                           img = &l3Rob1Walk[((int)(r->anim / 10.0)) % 3];
+		}
+		else
+		{
+			scale = l3Rob2Scale;
+			if (r->state == L3_ROB_ATTACK) img = &l3Rob2Kill[(r->timer < 14) ? 0 : 1];
+			else                           img = &l3Rob2Walk[((int)(r->anim / 12.0)) % 2];
+		}
+		l3DrawImg(img, sx, L3_GROUND_Y, scale, flip);
+	}
+}
+
+static void l3DrawVehicles()
+{
+	int i;
+	double th = l3TankH();
+
+	for (i = 0; i < L3_CAR_COUNT; i++)
+	{
+		L3Car *c = &l3Cars[i];
+		double sx = c->x - l3Cam;
+		if (c->state != L3_CAR_DRIVING) continue;
+		if (sx > SCREEN_WIDTH || sx + L3_CAR_W < 0) continue;
+		iSetColor(255, 255, 255);
+		iShowImage((int)sx, (int)L3_GROUND_Y - 4, (int)L3_CAR_W, (int)l3CarH(c->art),
+		           l3CarArt[c->art].tex);
+	}
+
+	for (i = 0; i < L3_TANK_COUNT; i++)
+	{
+		L3Tank *t = &l3Tanks[i];
+		double sx = t->x - l3Cam;
+		if (!t->alive || t->gone) continue;
+		if (sx > SCREEN_WIDTH || sx + L3_TANK_W < 0) continue;
+		if (t->flash > 0) sx += (t->flash % 2) ? 3 : -3;     /* shudders when hit */
+		iSetColor(255, 255, 255);
+		iShowImage((int)sx, (int)L3_GROUND_Y - 4, (int)L3_TANK_W, (int)th, l3TankArt.tex);
+	}
+}
+
+static unsigned int l3BikePoseTexture()
+{
+	int pose = 0;
+	if (l3Bike.count < 1) return 0;
+	if (l3Speed >= L3_VFAST_SPRITE_AT)     pose = 2;
+	else if (l3Speed >= L3_FAST_SPRITE_AT) pose = 1;
+	if (pose >= l3Bike.count) pose = 0;
+	return l3Bike.frame[pose];
+}
+
+/*  Inside the loop the Honda is drawn with the supplied loop poses: level,
+    45 degrees, climbing (upper vertical), upside down (horizontal) and
+    coming down (downer vertical). Each pose is turned only by the few
+    degrees between it and the exact point on the circle.               */
+static void l3DrawLoopBike()
+{
+	double cx  = l3LoopCenterX() - l3Cam;
+	double cy  = l3LoopCenterY();
+	double rp  = l3LoopPathRadius();
+	double px  = cx + rp * cos(l3LoopPhi);
+	double py  = cy + rp * sin(l3LoopPhi);
+	double deg = l3LoopPhi * 180.0 / L3_PI + 90.0;      /* travel direction */
+	double s   = (l3Bike.frameW > 0) ? (double)l3BikeW / l3Bike.frameW : 0.21;
+
+	while (deg < 0)    deg += 360.0;
+	while (deg >= 360) deg -= 360.0;
+
+	if (deg < 22.5 || deg >= 337.5)
+		l3DrawImgTurned(l3BikePoseTexture(), l3BikeW, l3BikeH, px, py, (deg < 180) ? deg : deg - 360);
+	else if (deg < 67.5 || deg >= 292.5)
+	{
+		double s45 = (l3Loop45.w > 0) ? (double)l3BikeW / l3Loop45.w : s;
+		l3DrawImgTurned(l3Loop45.tex, l3Loop45.w * s45, l3Loop45.h * s45, px, py,
+		                (deg < 180) ? deg : deg - 360);
+	}
+	else if (deg < 135)
+		l3DrawImgTurned(l3LoopUp.tex,   l3LoopUp.w * s,   l3LoopUp.h * s,   px, py, deg - 90);
+	else if (deg < 225)
+		l3DrawImgTurned(l3LoopTop.tex,  l3LoopTop.w * s,  l3LoopTop.h * s,  px, py, deg - 180);
+	else
+		l3DrawImgTurned(l3LoopDown.tex, l3LoopDown.w * s, l3LoopDown.h * s, px, py, deg - 270);
+}
+
+static void l3DrawParkedBike()
+{
+	double sx = l3BikeX - l3Cam;
+	if (l3Parked.w > 0)
+		l3DrawImg(&l3Parked, sx + l3BikeW * 0.5, l3BikeY, (double)l3BikeW / l3Parked.w, false);
+}
+
+static void l3DrawRider()
+{
+	const L3Img *img;
+	double sx = l3FootX - l3Cam;
+	bool flip = (l3Facing < 0);
+	bool firing = (l3FireAnim > 0);
+
+	if (!l3FootOnGround)
+		img = l3HasGun ? &l3WalkFire[1] : &l3Run[1];
+	else if (fabs(l3FootVX) < 0.3)
+		img = l3HasGun ? &l3StandFire[firing ? ((l3FireAnim / 4) % 2) : 0] : &l3Walk[0];
+	else if (fabs(l3FootVX) > (L3_FOOT_WALK + L3_FOOT_RUN) * 0.5)
+		img = l3HasGun ? &l3WalkFire[((int)(l3FootAnim / 16.0)) % 4] : &l3Run[((int)(l3FootAnim / 18.0)) % 4];
+	else
+		img = l3HasGun ? &l3WalkFire[((int)(l3FootAnim / 12.0)) % 4] : &l3Walk[((int)(l3FootAnim / 12.0)) % 4];
+
+	l3DrawImg(img, sx, l3FootY, l3FootScale, flip);
+}
+
+static void l3DrawPlayer()
+{
+	double sx = l3BikeX - l3Cam;
+	bool blinkOff = (l3HurtTicks > 0 && (l3HurtTicks / 4) % 2 == 1);
+
+	/* ---- after the run ended ---- */
+	if (l3State == LEVEL03_GAMEOVER)
+	{
+		int f = l3EndTimer / 20;
+		if (f > 2) f = 2;
+
+		if (l3LoseReason == L3_LOSE_ROBBERS || (l3LoseReason == L3_LOSE_TANK && l3Mode == L3_MODE_FOOT))
+		{
+			if (l3Mode == L3_MODE_FOOT)
+			{
+				l3DrawParkedBike();
+				l3DrawImg(&l3Murdered[f], l3FootX - l3Cam, l3FootY, l3FootScale, false);
+			}
+			else
+			{
+				l3DrawParkedBike();
+				l3DrawImg(&l3Murdered[f], sx + l3BikeW * L3_RIDER_ON_BIKE_X - 60, l3BikeY, l3FootScale, false);
+			}
+			return;
+		}
+		/* crashes and empty tanks fall through and show the Honda */
+	}
+
+	switch (l3Mode)
+	{
+	case L3_MODE_LOOP:
+		l3DrawLoopBike();
+		break;
+
+	case L3_MODE_DISMOUNT:
+	{
+		const L3Img *img = (l3ModeTimer < 14) ? &l3GetDown :
+		                   (l3ModeTimer < 28) ? &l3AfterDown2 : &l3AfterDown3;
+		if (img->w > 0)
+			l3DrawImg(img, sx + l3BikeW * 0.5, l3BikeY, (double)l3BikeW / img->w, false);
+		break;
+	}
+
+	case L3_MODE_MOUNT:
+		if (l3GetUp.w > 0)
+			l3DrawImg(&l3GetUp, sx + l3BikeW * 0.5, l3BikeY, (double)l3BikeW / l3GetUp.w, false);
+		break;
+
+	case L3_MODE_FOOT:
+		l3DrawParkedBike();
+		if (!blinkOff) l3DrawRider();
+		break;
+
+	default:
+		if (!blinkOff)
+		{
+			iSetColor(255, 255, 255);
+			iRotate(sx + l3BikeW * 0.5, l3BikeY, l3BikeAngle);
+			iShowImage((int)sx, (int)l3BikeY, l3BikeW, l3BikeH, l3BikePoseTexture());
+			iUnRotate();
+		}
+		break;
+	}
+}
+
+static void l3DrawBullets()
+{
+	int i;
+	for (i = 0; i < L3_MAX_BULLETS; i++)
+	{
+		double sx;
+		if (!l3Bullets[i].active) continue;
+		sx = l3Bullets[i].x - l3Cam;
+		glColor4f(1.0f, 0.75f, 0.2f, 0.45f);
+		iFilledRectangle(sx - 10, l3Bullets[i].y - 3, 20, 6);
+		iSetColor(255, 245, 190);
+		iFilledRectangle(sx - 7, l3Bullets[i].y - 1.5, 14, 3);
+	}
+
+	/* muzzle flash on the Honda (the rider sprites carry their own) */
+	if (l3FireAnim > 4 && l3Mode == L3_MODE_BIKE)
+	{
+		double mx = l3BikeX + l3BikeW * 0.95 - l3Cam, my = l3BikeY + l3BikeH * 0.62;
+		glColor4f(1.0f, 0.85f, 0.3f, 0.8f);
+		iFilledCircle(mx, my, 9);
+		iSetColor(255, 255, 230);
+		iFilledCircle(mx, my, 4);
+	}
+}
+
+static void l3DrawBooms()
+{
+	int i;
+	for (i = 0; i < L3_MAX_BOOMS; i++)
+	{
+		double sx, a, r;
+		if (!l3Booms[i].active) continue;
+		sx = l3Booms[i].x - l3Cam;
+		a  = 1.0 - l3Booms[i].t / 45.0;
+		r  = 30 + l3Booms[i].t * 3.0;
+		glColor4f(0.95f, 0.35f, 0.05f, (float)(0.75 * a));
+		iFilledCircle(sx, l3Booms[i].y, r);
+		glColor4f(1.0f, 0.8f, 0.2f, (float)(0.85 * a));
+		iFilledCircle(sx, l3Booms[i].y, r * 0.6);
+		glColor4f(1.0f, 1.0f, 0.85f, (float)a);
+		iFilledCircle(sx, l3Booms[i].y, r * 0.25);
+	}
+}
+
+/* which fight the player is standing in, or -1 */
+static int l3FightGroup()
+{
+	double x = l3PlayerCX();
+	if (x >= L3_PANEL(3) - 200 && x < L3_PANEL(4)) return L3_GROUP_BG4;
+	if (x >= L3_PANEL(4) && x < L3_PANEL(5))       return L3_GROUP_BG5;
+	return -1;
+}
+
+static void l3DrawHud()
+{
+	char buf[80];
+	double barW = 200, barH = 14;
+	double progress;
+	int group = l3FightGroup();
+
+	iSetColor(COL_BG_R, COL_BG_G, COL_BG_B);
+	iFilledRectangle(0, SCREEN_HEIGHT - 74, SCREEN_WIDTH, 74);
+	iSetColor(COL_RED_R, COL_RED_G, COL_RED_B);
+	iFilledRectangle(0, SCREEN_HEIGHT - 77, SCREEN_WIDTH, 3);
+
+	iSetColor(COL_TEXT_R, COL_TEXT_G, COL_TEXT_B);
+	drawText(26, SCREEN_HEIGHT - 38, "LEVEL 03", GLUT_BITMAP_TIMES_ROMAN_24);
+
+	/* fuel */
+	iSetColor(COL_MUTED_R, COL_MUTED_G, COL_MUTED_B);
+	drawText(180, SCREEN_HEIGHT - 29, "FUEL", GLUT_BITMAP_HELVETICA_12);
+	iSetColor(COL_PANEL_R, COL_PANEL_G, COL_PANEL_B);
+	iFilledRectangle(222, SCREEN_HEIGHT - 32, barW, barH);
+	if (l3Fuel > L3_FUEL_MAX * 0.25) iSetColor(60, 160, 235);
+	else                             iSetColor(240, 160, 40);
+	iFilledRectangle(222, SCREEN_HEIGHT - 32, barW * l3Fuel / L3_FUEL_MAX, barH);
+	iSetColor(120, 120, 130);
+	iRectangle(222, SCREEN_HEIGHT - 32, barW, barH);
+
+	/* volt */
+	iSetColor(COL_MUTED_R, COL_MUTED_G, COL_MUTED_B);
+	drawText(180, SCREEN_HEIGHT - 57, "VOLT", GLUT_BITMAP_HELVETICA_12);
+	iSetColor(COL_PANEL_R, COL_PANEL_G, COL_PANEL_B);
+	iFilledRectangle(222, SCREEN_HEIGHT - 60, barW, barH);
+	iSetColor(255, 60, 200);
+	iFilledRectangle(222, SCREEN_HEIGHT - 60, barW * l3VoltTicks / (double)L3_VOLT_TICKS, barH);
+	iSetColor(120, 120, 130);
+	iRectangle(222, SCREEN_HEIGHT - 60, barW, barH);
+	if (l3VoltTicks > 0)
+	{
+		iSetColor(255, 120, 230);
+		drawText(222 + barW + 10, SCREEN_HEIGHT - 58, "ON", GLUT_BITMAP_HELVETICA_12);
+	}
+
+	/* coins + score */
+	iSetColor(255, 206, 64);
+	iFilledCircle(472, SCREEN_HEIGHT - 26, 11);
+	iSetColor(COL_TEXT_R, COL_TEXT_G, COL_TEXT_B);
+	sprintf_s(buf, "%d", l3CoinsTaken);
+	drawText(490, SCREEN_HEIGHT - 32, buf, GLUT_BITMAP_HELVETICA_18);
+	sprintf_s(buf, "SCORE  %d", l3Score);
+	drawText(545, SCREEN_HEIGHT - 32, buf, GLUT_BITMAP_TIMES_ROMAN_24);
+
+	/* hits in the current fight */
+	if (group >= 0)
+	{
+		sprintf_s(buf, "HITS  %d / %d", l3Hits[group], L3_GROUP_HIT_LIMIT[group]);
+		iSetColor(255, 90, 90);
+		drawText(760, SCREEN_HEIGHT - 32, buf, GLUT_BITMAP_HELVETICA_18);
+	}
+
+	if (l3HasGun)
+	{
+		iSetColor(90, 230, 255);
+		drawText(545, SCREEN_HEIGHT - 58, "MACHINE GUN", GLUT_BITMAP_HELVETICA_12);
+	}
+
+	/* route */
+	progress = l3Cam / L3_ROUTE_END;
+	if (progress > 1) progress = 1;
+	sprintf_s(buf, "ROUTE  BG %d / %d", level03BackgroundIndex() + 1, L3_BG_COUNT);
+	iSetColor(COL_MUTED_R, COL_MUTED_G, COL_MUTED_B);
+	drawText(SCREEN_WIDTH - 300, SCREEN_HEIGHT - 28, buf, GLUT_BITMAP_HELVETICA_12);
+	iSetColor(COL_PANEL_R, COL_PANEL_G, COL_PANEL_B);
+	iFilledRectangle(SCREEN_WIDTH - 300, SCREEN_HEIGHT - 48, 270, 10);
+	iSetColor(COL_RED_R, COL_RED_G, COL_RED_B);
+	iFilledRectangle(SCREEN_WIDTH - 300, SCREEN_HEIGHT - 48, 270 * progress, 10);
+
+	/* controls for the current mode, along the bottom of the road */
+	iSetColor(200, 200, 205);
+	if (l3Mode == L3_MODE_FOOT)
+		drawText(20, 12, "ON FOOT:  D walk (hold = run)   A stop / walk back   W jump   S fast drop   "
+		                 "SPACE shoot   ENTER ride   P pause   R restart   ESC menu",
+		         GLUT_BITMAP_HELVETICA_12);
+	else
+		drawText(20, 12, "HONDA:  D throttle   A brake / reverse   W jump   S fast drop   V volt speed   "
+		                 "ENTER get off   P pause   R restart   ESC menu",
+		         GLUT_BITMAP_HELVETICA_12);
+}
+
+/* one line in the middle of the screen: a message, or a hint for right now */
+static void l3DrawBanner()
+{
+	const char *text = NULL;
+	double w;
+
+	if (l3State != LEVEL03_PLAYING || l3Paused) return;
+
+	if (l3MsgTicks > 0)
+		text = l3Msg;
+	else if (l3Mode == L3_MODE_BIKE && !l3LoopCleared && l3VoltTicks == 0 &&
+	         l3BikeX > L3_LOOP_X - 1100 && l3BikeX < l3LoopCenterX())
+		text = "PRESS V FOR VOLT SPEED  -  THE 360 LOOP NEEDS IT";
+	else if (l3Mode == L3_MODE_BIKE && l3GateClosed() && l3BikeX + l3BikeW > L3_GATE_X - 60)
+		text = "ROBBERS BLOCK THE ROAD!  PRESS ENTER TO GET OFF THE HONDA";
+	else if (l3Mode == L3_MODE_FOOT &&
+	         fabs(l3FootX - (l3BikeX + l3BikeW * L3_RIDER_ON_BIKE_X)) <= L3_MOUNT_RANGE &&
+	         !l3GateClosed())
+		text = "PRESS ENTER TO RIDE THE HONDA";
+
+	if (text == NULL) return;
+
+	w = textWidth(text, GLUT_BITMAP_HELVETICA_18) + 60;
+	glColor4f(0.05f, 0.03f, 0.08f, 0.72f);
+	iFilledRectangle(SCREEN_WIDTH / 2 - w / 2, 520, w, 44);
+	iSetColor(255, 60, 170);
+	iFilledRectangle(SCREEN_WIDTH / 2 - w / 2, 520, w, 2);
+	iFilledRectangle(SCREEN_WIDTH / 2 - w / 2, 562, w, 2);
+	iSetColor(255, 240, 250);
+	drawTextCentered(SCREEN_WIDTH / 2, 536, text, GLUT_BITMAP_HELVETICA_18);
+}
+
+static void l3DrawResult()
+{
+	char buf[96];
+	double pw = 640, ph = 260;
+	double px = SCREEN_WIDTH / 2 - pw / 2;
+	double py = SCREEN_HEIGHT / 2 - ph / 2;
+	const char *title, *line;
+
+	if (l3State == LEVEL03_WIN)
+	{
+		title = "LEVEL 3 COMPLETED";
+		line  = "You rode the whole route, BG1 to BG13.";
+	}
+	else if (l3LoseReason == L3_LOSE_FUEL)
+	{
+		title = "GAME OVER";
+		line  = "Out of fuel - grab the OCTANE cans along the road.";
+	}
+	else if (l3LoseReason == L3_LOSE_CAR)
+	{
+		title = "GAME OVER";
+		line  = "Hit an oncoming car - jump over them with W.";
+	}
+	else if (l3LoseReason == L3_LOSE_TANK)
+	{
+		title = "GAME OVER";
+		line  = "Crushed by the tank - jump it on the Honda or shoot it down.";
+	}
+	else
+	{
+		title = "GAME OVER";
+		line  = "The robbers got you.";
+	}
+
+	iSetColor(COL_BG_R, COL_BG_G, COL_BG_B);
+	iFilledRectangle(px, py, pw, ph);
+	iSetColor(COL_RED_R, COL_RED_G, COL_RED_B);
+	drawBorder(px, py, pw, ph, 3);
+	iFilledRectangle(px, py + ph - 62, pw, 62);
+
+	iSetColor(255, 255, 255);
+	drawTextCentered(SCREEN_WIDTH / 2, py + ph - 42, title, GLUT_BITMAP_TIMES_ROMAN_24);
+
+	iSetColor(COL_TEXT_R, COL_TEXT_G, COL_TEXT_B);
+	drawTextCentered(SCREEN_WIDTH / 2, py + ph - 104, line, GLUT_BITMAP_HELVETICA_18);
+
+	sprintf_s(buf, "FINAL SCORE   %d", l3Score);
+	drawTextCentered(SCREEN_WIDTH / 2, py + 96, buf, GLUT_BITMAP_TIMES_ROMAN_24);
+
+	sprintf_s(buf, "COINS  %d        ROBBERS DOWN  %d        FUEL LEFT  %d",
+	          l3CoinsTaken, l3Kills, (int)l3Fuel);
+	iSetColor(COL_MUTED_R, COL_MUTED_G, COL_MUTED_B);
+	drawTextCentered(SCREEN_WIDTH / 2, py + 66, buf, GLUT_BITMAP_HELVETICA_12);
+
+	iSetColor(COL_TEXT_R, COL_TEXT_G, COL_TEXT_B);
+	drawTextCentered(SCREEN_WIDTH / 2, py + 28,
+	                 "R  restart level 3          ESC  main menu", GLUT_BITMAP_HELVETICA_18);
+}
+
+void drawLevel03()
+{
+	l3DrawBackgrounds();
+	l3DrawRoad();
+	l3DrawRamps();
+	l3DrawDeadRobbers();
+	l3DrawPickups();
+	l3DrawVehicles();
+	l3DrawRobbers();
+	l3DrawPlayer();
+	l3DrawBullets();
+	l3DrawBooms();
+	l3DrawHud();
+	l3DrawBanner();
+
+	if (l3State != LEVEL03_PLAYING)
+	{
+		if (l3State == LEVEL03_WIN || l3EndTimer > 50)
+			l3DrawResult();
+	}
+	else if (l3Paused)
+	{
+		double pw = 460, ph = 150;
+		double px = SCREEN_WIDTH / 2 - pw / 2;
+		double py = SCREEN_HEIGHT / 2 - ph / 2;
+
+		iSetColor(COL_BG_R, COL_BG_G, COL_BG_B);
+		iFilledRectangle(px, py, pw, ph);
+		iSetColor(COL_RED_R, COL_RED_G, COL_RED_B);
+		drawBorder(px, py, pw, ph, 3);
+		iSetColor(COL_TEXT_R, COL_TEXT_G, COL_TEXT_B);
+		drawTextCentered(SCREEN_WIDTH / 2, py + 92, "PAUSED", GLUT_BITMAP_TIMES_ROMAN_24);
+		drawTextCentered(SCREEN_WIDTH / 2, py + 46,
+		                 "P  resume        R  restart        ESC  main menu",
+		                 GLUT_BITMAP_HELVETICA_12);
+	}
+}
+
+#endif

@@ -1,0 +1,783 @@
+/*
+ *  Level01.hpp  --  Honda Rush: Career Rider, LEVEL 01
+ *
+ *  A continuous side-scrolling motorcycle rush. The bike is held at a fixed
+ *  point on screen and the world scrolls past it, so obstacles, coins and
+ *  fuel cans all live in world coordinates and are drawn at
+ *  (worldX - cameraX). That keeps everything synchronised with the
+ *  scrolling background automatically.
+ *
+ *  The level runs as three states - riding, win, game over - inside the
+ *  project's existing STATE_LEVEL01 screen, so the menu routing in
+ *  iMain.cpp does not change.
+ *
+ *  Entry points used by iMain.cpp (existing project names):
+ *      level01Init()    load assets once, at start up
+ *      level01Reset()   start / restart the level
+ *      level01Update()  one fixed step, called by the game timer
+ *      level01Draw()    render
+ *
+ *  Not part of level 01: level 02+, career mode, bike unlocking.
+ */
+
+#ifndef LEVEL01_HPP
+#define LEVEL01_HPP
+
+/* ==================== ASSET PATHS ==================== */
+#define LEVEL01_BG_PATH     "Images/level01_bg.png"
+#define BIKE_FRAME_PATH     "bike images/frame_%02d.png"
+#define BIKE_FRAME_FIRST    1
+#define BIKE_FRAME_COUNT    8
+#define FUEL_ICON_PATH      "Images/fuel_icon.png"
+
+/* ==================== TUNING ====================
+ *  Everything a play tester would want to change lives here.
+ */
+#define GROUND_Y            150.0   /* height of the road surface        */
+
+/*  The backdrop photo has a road of its own along its bottom edge. It is
+    drawn shifted down so that road hides behind the asphalt strip below,
+    leaving only the buildings, trees and sky above the track.            */
+#define BG_Y_OFFSET        -120
+#define BG_DRAW_HEIGHT     (SCREEN_HEIGHT + 30)
+#define BIKE_SCREEN_X       230.0   /* the bike never leaves this column */
+#define BIKE_DRAW_WIDTH     200     /* height follows the frame's aspect */
+
+#define BIKE_CRUISE_SPEED     7   /* the bike always rushes forward    */
+#define BIKE_THROTTLE_SPEED   50
+#define BIKE_BRAKE_SPEED      2.2
+#define BIKE_ACCEL            0.16  /* how quickly speed changes         */
+
+#define JUMP_VELOCITY        18
+
+#define GRAVITY               0.87
+
+#define HP_MAX              100
+#define COLLISION_DAMAGE     25     /* HP lost per obstacle hit          */
+#define HIT_FLASH_TICKS      36     /* purely visual feedback            */
+
+#define FUEL_MAX            100.0
+#define FUEL_START          100.0
+#define FUEL_DRAIN            0.050 /* fuel burned per tick while riding */
+#define FUEL_PICKUP          28.0   /* fuel gained per can               */
+
+#define FINISH_X          14000.0   /* length of the level in world px   */
+
+/* ==================== WORLD OBJECTS ==================== */
+#define MAX_OBSTACLES     64
+#define MAX_COINS        240
+#define MAX_FUEL_CANS     24
+
+#define COIN_RADIUS       15.0
+#define FUEL_CAN_W        52
+#define FUEL_CAN_H        54
+
+struct Obstacle
+{
+	double x;          /* world position, bottom sits on the road */
+	int    type;
+	bool   touching;   /* already counted - stops repeat damage   */
+};
+
+struct Pickup
+{
+	double x, y;
+	bool   taken;
+};
+
+/*  The obstacle art from the project's obstacles folder. insetX / insetY
+    shrink the collision box a little so clipping a stray pixel of grass or
+    flame does not count as a crash.                                      */
+struct ObstacleType
+{
+	const char  *path;
+	int          w, h;
+	double       insetX, insetY;
+	unsigned int tex;
+};
+
+#define OBS_TYPE_COUNT 4
+
+ObstacleType obsType[OBS_TYPE_COUNT] =
+{
+	{ "obstacles/obs_barrier.png", 168, 100, 16, 10, 0 },   /* wooden fence   */
+	{ "obstacles/obs_block.png",    96,  99, 10,  6, 0 },   /* concrete blocks*/
+	{ "obstacles/obs_tire.png",     84,  84, 10, 10, 0 },   /* loose tyre     */
+	{ "obstacles/obs_pit.png",     124, 104, 18, 14, 0 }    /* burning logs   */
+};
+
+/* ==================== LEVEL STATE ==================== */
+#define LEVEL01_PLAYING   0
+#define LEVEL01_WIN       1
+#define LEVEL01_GAMEOVER  2
+
+#define LOSE_NONE         0
+#define LOSE_HP           1
+#define LOSE_FUEL         2
+
+int lvlState;
+int lvlLoseReason;
+
+unsigned int imgLevelBG   = 0;
+unsigned int imgFuelIcon  = 0;
+SpriteSheet  bikeFrames;
+
+/* player */
+double bikeY, bikeVY, bikeSpeed;
+int    bikeW, bikeH;
+int    bikeFrame;
+double bikeAnimAccum;
+bool   bikeOnGround;
+int    bikeHitFlash;
+
+/* world */
+double cameraX;
+Obstacle obs[MAX_OBSTACLES];
+Pickup   coins[MAX_COINS];
+Pickup   fuelCans[MAX_FUEL_CANS];
+int obsCount, coinCount, fuelCount;
+
+/* run stats */
+int    lvlHP;
+double lvlFuel;
+int    lvlCoins;
+int    lvlTicks;
+bool   lvlPaused;
+bool   lvlJumpRequested;      /* set by the input handler, used next tick */
+
+/* kept for the whole session, as the proposal's career coins */
+int gSessionCoins = 0;
+
+/* ==================== MUSIC ====================
+ *  Thin wrappers over the project's existing audio system, so level 01
+ *  never talks to MCI directly. musicPlay() ignores a request for the track
+ *  that is already running, so the song is not restarted mid level.
+ */
+void playLevel01Music()
+{
+	musicPlay(MUSIC_LEVEL01);
+}
+
+void stopLevel01Music()
+{
+	musicStop();
+}
+
+/* ==================== SET UP ==================== */
+void level01Init()
+{
+	int i;
+
+	imgLevelBG  = loadImage(LEVEL01_BG_PATH);
+	imgFuelIcon = loadImage(FUEL_ICON_PATH);
+
+	for (i = 0; i < OBS_TYPE_COUNT; i++)
+		obsType[i].tex = loadImage(obsType[i].path);
+
+	if (!loadImageSequence(&bikeFrames, BIKE_FRAME_PATH, BIKE_FRAME_FIRST, BIKE_FRAME_COUNT))
+		printf("[level01] bike frames missing - check the \"bike images\" folder.\n");
+
+	/* never stretch the bike: derive the height from the frame's aspect */
+	bikeW = BIKE_DRAW_WIDTH;
+	if (bikeFrames.frameW > 0)
+		bikeH = (int)((double)BIKE_DRAW_WIDTH * bikeFrames.frameH / bikeFrames.frameW + 0.5);
+	else
+		bikeH = BIKE_DRAW_WIDTH;
+}
+
+/*  Lays out the track. The spacing rules guarantee a long clear run-up to
+    every obstacle, so the jump is always reactable.                      */
+static void buildTrack()
+{
+	double x = 1800.0;
+	int i = 0, k;
+
+	obsCount = 0;
+	coinCount = 0;
+	fuelCount = 0;
+
+	while (x < FINISH_X - 1200.0 && obsCount < MAX_OBSTACLES)
+	{
+		obs[obsCount].x        = x;
+		obs[obsCount].type     = i % OBS_TYPE_COUNT;
+		obs[obsCount].touching = false;
+		obsCount++;
+
+		/* an arc of coins across the jump - the reward for clearing it */
+		for (k = 0; k < 5 && coinCount < MAX_COINS; k++)
+		{
+			double t = (k - 2) * 0.5;                       /* -1 .. +1 */
+			coins[coinCount].x     = x + 60 + (k - 2) * 76;
+			coins[coinCount].y     = GROUND_Y + 128 - t * t * 66;
+			coins[coinCount].taken = false;
+			coinCount++;
+		}
+
+		/* a line of coins along the road in the gap that follows */
+		for (k = 0; k < 4 && coinCount < MAX_COINS; k++)
+		{
+			coins[coinCount].x     = x + 380 + k * 62;
+			coins[coinCount].y     = GROUND_Y + 46;
+			coins[coinCount].taken = false;
+			coinCount++;
+		}
+
+		/* a fuel can every third gap */
+		if (i % 3 == 2 && fuelCount < MAX_FUEL_CANS)
+		{
+			fuelCans[fuelCount].x     = x + 300;
+			fuelCans[fuelCount].y     = GROUND_Y + 34;
+			fuelCans[fuelCount].taken = false;
+			fuelCount++;
+		}
+
+		x += 640.0 + (i % 4) * 110.0;
+		i++;
+	}
+}
+
+void level01Reset()
+{
+	cameraX   = 0;
+	bikeY     = GROUND_Y;
+	bikeVY    = 0;
+	bikeSpeed = BIKE_CRUISE_SPEED;
+	bikeFrame = 0;
+	bikeAnimAccum = 0;
+	bikeOnGround  = true;
+	bikeHitFlash  = 0;
+
+	lvlHP     = HP_MAX;
+	lvlFuel   = FUEL_START;
+	lvlCoins  = 0;
+	lvlTicks  = 0;
+	lvlPaused = false;
+	lvlJumpRequested = false;
+
+	lvlState      = LEVEL01_PLAYING;
+	lvlLoseReason = LOSE_NONE;
+
+	buildTrack();
+}
+
+/* ==================== HELPERS ==================== */
+
+/*  The bike's collision box in world coordinates. It is inset from the
+    drawn sprite: the rider's head and the empty air around the wheels
+    should not crash the bike.                                            */
+static void bikeHitBox(double *bx, double *by, double *bw, double *bh)
+{
+	double insetX = bikeW * 0.14;
+	double insetTop = bikeH * 0.26;
+
+	*bx = cameraX + BIKE_SCREEN_X + insetX;
+	*by = bikeY + 6;
+	*bw = bikeW - 2 * insetX;
+	*bh = bikeH - insetTop - 6;
+}
+
+static void enterWin()
+{
+	lvlState = LEVEL01_WIN;
+	gSessionCoins += lvlCoins;
+	stopLevel01Music();
+	sfxPlay(SFX_WIN);
+}
+
+static void enterGameOver(int reason)
+{
+	lvlState      = LEVEL01_GAMEOVER;
+	lvlLoseReason = reason;
+	stopLevel01Music();
+	sfxPlay(SFX_LOSE);
+}
+
+/* ==================== UPDATE STEPS ==================== */
+
+/*  Throttle, brake, jump, gravity and the road under the wheels. */
+static void updatePlayer()
+{
+	double target;
+
+	/* the bike always rushes forward; the player trims the speed */
+	if (keyHeld('d') || keyHeld('D') || specialKeyHeld(GLUT_KEY_RIGHT))
+		target = BIKE_THROTTLE_SPEED;
+	else if (keyHeld('a') || keyHeld('A') || specialKeyHeld(GLUT_KEY_LEFT))
+		target = BIKE_BRAKE_SPEED;
+	else
+		target = BIKE_CRUISE_SPEED;
+
+	if (bikeSpeed < target)
+	{
+		bikeSpeed += BIKE_ACCEL;
+		if (bikeSpeed > target) bikeSpeed = target;
+	}
+	else if (bikeSpeed > target)
+	{
+		bikeSpeed -= BIKE_ACCEL;
+		if (bikeSpeed < target) bikeSpeed = target;
+	}
+
+	cameraX += bikeSpeed;
+
+	/* jump - only from the road, never in mid air */
+	if (lvlJumpRequested && bikeOnGround)
+	{
+		bikeVY = JUMP_VELOCITY;
+		bikeOnGround = false;
+	}
+	lvlJumpRequested = false;
+
+	/* gravity and ground collision */
+	bikeVY -= GRAVITY;
+	bikeY  += bikeVY;
+
+	if (bikeY <= GROUND_Y)
+	{
+		bikeY = GROUND_Y;
+		bikeVY = 0;
+		bikeOnGround = true;
+	}
+
+	/* wheels turn with the distance covered, so the animation matches speed */
+	bikeAnimAccum += bikeSpeed;
+	while (bikeAnimAccum >= 22.0)
+	{
+		bikeAnimAccum -= 22.0;
+		if (bikeFrames.count > 0)
+			bikeFrame = (bikeFrame + 1) % bikeFrames.count;
+	}
+
+	if (bikeHitFlash > 0)
+		bikeHitFlash--;
+}
+
+/*  One collision event per obstacle: damage and sound fire on the tick the
+    boxes start overlapping, and only re-arm once the bike has separated. */
+static void checkObstacleCollision()
+{
+	double bx, by, bw, bh;
+	int i;
+
+	bikeHitBox(&bx, &by, &bw, &bh);
+
+	for (i = 0; i < obsCount; i++)
+	{
+		ObstacleType *t = &obsType[obs[i].type];
+		double ox = obs[i].x + t->insetX;
+		double oy = GROUND_Y + t->insetY;
+		double ow = t->w - 2 * t->insetX;
+		double oh = t->h - t->insetY;
+
+		if (rectsOverlap(bx, by, bw, bh, ox, oy, ow, oh))
+		{
+			if (!obs[i].touching)          /* the moment of impact */
+			{
+				obs[i].touching = true;
+				lvlHP -= COLLISION_DAMAGE;
+				bikeHitFlash = HIT_FLASH_TICKS;
+				sfxPlay(SFX_COLLISION);
+
+				if (lvlHP <= 0)
+				{
+					lvlHP = 0;
+					enterGameOver(LOSE_HP);
+					return;
+				}
+			}
+		}
+		else
+		{
+			obs[i].touching = false;       /* separated - can hit again */
+		}
+	}
+}
+
+/*  Obstacles are static scenery in level 01; this keeps the call site
+    ready for the moving obstacles of later levels.                       */
+static void updateObstacles()
+{
+	checkObstacleCollision();
+}
+
+static void checkCoinCollision()
+{
+	double bx, by, bw, bh;
+	int i;
+
+	bikeHitBox(&bx, &by, &bw, &bh);
+
+	for (i = 0; i < coinCount; i++)
+	{
+		if (coins[i].taken)
+			continue;
+
+		if (rectsOverlap(bx, by, bw, bh,
+		                 coins[i].x - COIN_RADIUS, coins[i].y - COIN_RADIUS,
+		                 COIN_RADIUS * 2, COIN_RADIUS * 2))
+		{
+			coins[i].taken = true;         /* gone for good */
+			lvlCoins++;
+			sfxPlay(SFX_COIN);
+		}
+	}
+}
+
+static void updateCoins()
+{
+	checkCoinCollision();
+}
+
+static void checkFuelCollision()
+{
+	double bx, by, bw, bh;
+	int i;
+
+	bikeHitBox(&bx, &by, &bw, &bh);
+
+	for (i = 0; i < fuelCount; i++)
+	{
+		if (fuelCans[i].taken)
+			continue;
+
+		if (rectsOverlap(bx, by, bw, bh,
+		                 fuelCans[i].x, fuelCans[i].y, FUEL_CAN_W, FUEL_CAN_H))
+		{
+			fuelCans[i].taken = true;
+			lvlFuel += FUEL_PICKUP;
+			if (lvlFuel > FUEL_MAX)
+				lvlFuel = FUEL_MAX;        /* never above the tank size */
+			sfxPlay(SFX_FUEL);
+		}
+	}
+}
+
+/*  Fuel burns while riding and is topped up by the cans on the track. */
+static void updateFuel()
+{
+	checkFuelCollision();
+
+	lvlFuel -= FUEL_DRAIN;
+
+	if (lvlFuel <= 0)
+	{
+		lvlFuel = 0;
+		enterGameOver(LOSE_FUEL);
+	}
+}
+
+static void checkFinishLine()
+{
+	if (cameraX + BIKE_SCREEN_X >= FINISH_X)
+		enterWin();
+}
+
+/* ==================== THE LEVEL STEP ====================
+ *
+ *  Called once per fixed update while STATE_LEVEL01 is on screen. Once the
+ *  level is won or lost nothing moves any more.
+ */
+void level01Update()
+{
+	if (lvlState != LEVEL01_PLAYING || lvlPaused)
+		return;
+
+	lvlTicks++;
+
+	updatePlayer();
+	updateObstacles();
+	if (lvlState != LEVEL01_PLAYING) return;   /* destroyed by that hit */
+
+	updateCoins();
+
+	updateFuel();
+	if (lvlState != LEVEL01_PLAYING) return;   /* ran dry */
+
+	checkFinishLine();
+}
+
+/* ==================== DRAWING ==================== */
+
+static void drawRoad()
+{
+	double period = 130.0, dashW = 74.0, x, off;
+
+	/* asphalt, a little darker towards the bottom of the screen */
+	iSetColor(56, 56, 60);
+	iFilledRectangle(0, 0, SCREEN_WIDTH, GROUND_Y);
+	iSetColor(44, 44, 48);
+	iFilledRectangle(0, 0, SCREEN_WIDTH, GROUND_Y * 0.42);
+
+	/* kerb along the top edge of the road */
+	iSetColor(96, 96, 102);
+	iFilledRectangle(0, GROUND_Y - 8, SCREEN_WIDTH, 8);
+	iSetColor(COL_RED_R, COL_RED_G, COL_RED_B);
+	iFilledRectangle(0, GROUND_Y - 2, SCREEN_WIDTH, 2);
+
+	/* white edge line just below the kerb */
+	iSetColor(150, 150, 148);
+	iFilledRectangle(0, GROUND_Y - 22, SCREEN_WIDTH, 3);
+
+	/* dashed centre line, scrolling with the world */
+	off = cameraX - floor(cameraX / period) * period;
+	for (x = -off; x < SCREEN_WIDTH; x += period)
+	{
+		iSetColor(205, 205, 195);
+		iFilledRectangle(x, GROUND_Y * 0.40, dashW, 6);
+	}
+}
+
+static void drawCoin(double sx, double sy)
+{
+	iSetColor(196, 148, 24);
+	iFilledCircle(sx, sy, COIN_RADIUS);
+	iSetColor(255, 206, 64);
+	iFilledCircle(sx, sy, COIN_RADIUS - 3);
+	iSetColor(255, 236, 160);
+	iFilledCircle(sx - 4, sy + 4, COIN_RADIUS - 10);
+}
+
+static void drawFinishLine()
+{
+	double sx = FINISH_X - cameraX;
+	int row, col;
+
+	if (sx < -80 || sx > SCREEN_WIDTH + 80)
+		return;
+
+	/* posts */
+	iSetColor(220, 220, 225);
+	iFilledRectangle(sx - 6, GROUND_Y, 12, 250);
+	iFilledRectangle(sx + 150, GROUND_Y, 12, 250);
+
+	/* chequered banner */
+	for (row = 0; row < 3; row++)
+	{
+		for (col = 0; col < 8; col++)
+		{
+			if ((row + col) % 2 == 0)
+				iSetColor(255, 255, 255);
+			else
+				iSetColor(25, 25, 28);
+
+			iFilledRectangle(sx + col * 20, GROUND_Y + 250 - (row + 1) * 22, 20, 22);
+		}
+	}
+
+	iSetColor(255, 255, 255);
+	drawText(sx + 6, GROUND_Y + 200, "FINISH", GLUT_BITMAP_HELVETICA_18);
+}
+
+static void drawHUD()
+{
+	char buf[64];
+	double barW = 220, barH = 16;
+	double progress;
+
+	iSetColor(COL_BG_R, COL_BG_G, COL_BG_B);
+	iFilledRectangle(0, SCREEN_HEIGHT - 78, SCREEN_WIDTH, 78);
+	iSetColor(COL_RED_R, COL_RED_G, COL_RED_B);
+	iFilledRectangle(0, SCREEN_HEIGHT - 81, SCREEN_WIDTH, 3);
+
+	iSetColor(COL_TEXT_R, COL_TEXT_G, COL_TEXT_B);
+	drawText(28, SCREEN_HEIGHT - 40, "LEVEL 01", GLUT_BITMAP_TIMES_ROMAN_24);
+
+	/* ---- HP ---- */
+	iSetColor(COL_MUTED_R, COL_MUTED_G, COL_MUTED_B);
+	drawText(190, SCREEN_HEIGHT - 30, "HP", GLUT_BITMAP_HELVETICA_12);
+	iSetColor(COL_PANEL_R, COL_PANEL_G, COL_PANEL_B);
+	iFilledRectangle(222, SCREEN_HEIGHT - 34, barW, barH);
+	if (lvlHP > HP_MAX / 3)
+		iSetColor(70, 200, 90);
+	else
+		iSetColor(COL_RED_R, COL_RED_G, COL_RED_B);
+	iFilledRectangle(222, SCREEN_HEIGHT - 34, barW * lvlHP / (double)HP_MAX, barH);
+	iSetColor(120, 120, 130);
+	iRectangle(222, SCREEN_HEIGHT - 34, barW, barH);
+	iSetColor(COL_TEXT_R, COL_TEXT_G, COL_TEXT_B);
+	sprintf_s(buf, "%d", lvlHP);
+	drawText(222 + barW + 10, SCREEN_HEIGHT - 32, buf, GLUT_BITMAP_HELVETICA_12);
+
+	/* ---- FUEL ---- */
+	iSetColor(COL_MUTED_R, COL_MUTED_G, COL_MUTED_B);
+	drawText(190, SCREEN_HEIGHT - 58, "FUEL", GLUT_BITMAP_HELVETICA_12);
+	iSetColor(COL_PANEL_R, COL_PANEL_G, COL_PANEL_B);
+	iFilledRectangle(222, SCREEN_HEIGHT - 62, barW, barH);
+	if (lvlFuel > FUEL_MAX * 0.25)
+		iSetColor(60, 160, 235);
+	else
+		iSetColor(240, 160, 40);
+	iFilledRectangle(222, SCREEN_HEIGHT - 62, barW * lvlFuel / FUEL_MAX, barH);
+	iSetColor(120, 120, 130);
+	iRectangle(222, SCREEN_HEIGHT - 62, barW, barH);
+	iSetColor(COL_TEXT_R, COL_TEXT_G, COL_TEXT_B);
+	sprintf_s(buf, "%d", (int)lvlFuel);
+	drawText(222 + barW + 10, SCREEN_HEIGHT - 60, buf, GLUT_BITMAP_HELVETICA_12);
+
+	/* ---- COINS ---- */
+	drawCoin(530, SCREEN_HEIGHT - 28);
+	iSetColor(COL_TEXT_R, COL_TEXT_G, COL_TEXT_B);
+	sprintf_s(buf, "COINS  %d", lvlCoins);
+	drawText(554, SCREEN_HEIGHT - 34, buf, GLUT_BITMAP_HELVETICA_18);
+
+	/* ---- distance to the finish line ---- */
+	progress = (cameraX + BIKE_SCREEN_X) / FINISH_X;
+	if (progress > 1) progress = 1;
+
+	iSetColor(COL_MUTED_R, COL_MUTED_G, COL_MUTED_B);
+	drawText(700, SCREEN_HEIGHT - 30, "TRACK", GLUT_BITMAP_HELVETICA_12);
+	iSetColor(COL_PANEL_R, COL_PANEL_G, COL_PANEL_B);
+	iFilledRectangle(748, SCREEN_HEIGHT - 32, 380, 12);
+	iSetColor(COL_RED_R, COL_RED_G, COL_RED_B);
+	iFilledRectangle(748, SCREEN_HEIGHT - 32, 380 * progress, 12);
+	iSetColor(120, 120, 130);
+	iRectangle(748, SCREEN_HEIGHT - 32, 380, 12);
+
+	iSetColor(COL_MUTED_R, COL_MUTED_G, COL_MUTED_B);
+	drawText(700, SCREEN_HEIGHT - 58,
+	         "SPACE / W  jump      D  throttle      A  brake      P  pause      ESC  menu",
+	         GLUT_BITMAP_HELVETICA_12);
+}
+
+/*  Shared panel for the win and game over screens. */
+static void drawResultPanel(const char *title, const char *line1, const char *line2)
+{
+	char buf[80];
+	double pw = 560, ph = 300;
+	double px = SCREEN_WIDTH / 2 - pw / 2;
+	double py = SCREEN_HEIGHT / 2 - ph / 2;
+
+	iSetColor(COL_BG_R, COL_BG_G, COL_BG_B);
+	iFilledRectangle(px, py, pw, ph);
+	iSetColor(COL_RED_R, COL_RED_G, COL_RED_B);
+	drawBorder(px, py, pw, ph, 3);
+	iFilledRectangle(px, py + ph - 62, pw, 62);
+
+	iSetColor(255, 255, 255);
+	drawTextCentered(SCREEN_WIDTH / 2, py + ph - 42, title, GLUT_BITMAP_TIMES_ROMAN_24);
+
+	iSetColor(COL_TEXT_R, COL_TEXT_G, COL_TEXT_B);
+	drawTextCentered(SCREEN_WIDTH / 2, py + ph - 100, line1, GLUT_BITMAP_HELVETICA_18);
+
+	iSetColor(COL_MUTED_R, COL_MUTED_G, COL_MUTED_B);
+	drawTextCentered(SCREEN_WIDTH / 2, py + ph - 128, line2, GLUT_BITMAP_HELVETICA_12);
+
+	iSetColor(COL_TEXT_R, COL_TEXT_G, COL_TEXT_B);
+	sprintf_s(buf, "COINS COLLECTED   %d", lvlCoins);
+	drawTextCentered(SCREEN_WIDTH / 2, py + 116, buf, GLUT_BITMAP_HELVETICA_18);
+
+	sprintf_s(buf, "DISTANCE   %d m        HP LEFT   %d        FUEL LEFT   %d",
+	          (int)((cameraX + BIKE_SCREEN_X) / 10.0), lvlHP, (int)lvlFuel);
+	iSetColor(COL_MUTED_R, COL_MUTED_G, COL_MUTED_B);
+	drawTextCentered(SCREEN_WIDTH / 2, py + 88, buf, GLUT_BITMAP_HELVETICA_12);
+
+	sprintf_s(buf, "SESSION COINS   %d", gSessionCoins);
+	drawTextCentered(SCREEN_WIDTH / 2, py + 64, buf, GLUT_BITMAP_HELVETICA_12);
+
+	iSetColor(COL_TEXT_R, COL_TEXT_G, COL_TEXT_B);
+	drawTextCentered(SCREEN_WIDTH / 2, py + 30, "R  ride again          ESC  main menu",
+	                 GLUT_BITMAP_HELVETICA_18);
+}
+
+void level01Draw()
+{
+	double bgOffset, sx;
+	int i;
+
+	/* ---- background, scrolling slower than the road for depth ---- */
+	bgOffset = cameraX * 0.35;
+	bgOffset = bgOffset - floor(bgOffset / SCREEN_WIDTH) * SCREEN_WIDTH;
+
+	iSetColor(255, 255, 255);
+	iShowImage((int)-bgOffset, BG_Y_OFFSET, SCREEN_WIDTH, BG_DRAW_HEIGHT, imgLevelBG);
+	iShowImage((int)(-bgOffset + SCREEN_WIDTH), BG_Y_OFFSET, SCREEN_WIDTH, BG_DRAW_HEIGHT, imgLevelBG);
+
+	drawRoad();
+	drawFinishLine();
+
+	/* ---- obstacles ---- */
+	for (i = 0; i < obsCount; i++)
+	{
+		ObstacleType *t = &obsType[obs[i].type];
+		sx = obs[i].x - cameraX;
+
+		if (sx > -t->w && sx < SCREEN_WIDTH)
+		{
+			iSetColor(255, 255, 255);
+			iShowImage((int)sx, (int)GROUND_Y, t->w, t->h, t->tex);
+		}
+	}
+
+	/* ---- coins ---- */
+	for (i = 0; i < coinCount; i++)
+	{
+		if (coins[i].taken)
+			continue;
+
+		sx = coins[i].x - cameraX;
+		if (sx > -40 && sx < SCREEN_WIDTH + 40)
+			drawCoin(sx, coins[i].y + sin((lvlTicks + i * 12) * 0.06) * 4.0);
+	}
+
+	/* ---- fuel cans ---- */
+	for (i = 0; i < fuelCount; i++)
+	{
+		if (fuelCans[i].taken)
+			continue;
+
+		sx = fuelCans[i].x - cameraX;
+		if (sx > -80 && sx < SCREEN_WIDTH + 80)
+		{
+			iSetColor(255, 255, 255);
+			iShowImage((int)sx, (int)(fuelCans[i].y + sin((lvlTicks + i * 20) * 0.05) * 5.0),
+			           FUEL_CAN_W, FUEL_CAN_H, imgFuelIcon);
+		}
+	}
+
+	/* ---- the bike ---- */
+	if (bikeFrames.count > 0)
+	{
+		/* skip a frame now and then right after a hit, so damage reads */
+		if (bikeHitFlash == 0 || (bikeHitFlash / 4) % 2 == 0)
+			iShowImage((int)BIKE_SCREEN_X, (int)bikeY, bikeW, bikeH,
+			           bikeFrames.frame[bikeFrame]);
+	}
+
+	drawHUD();
+
+	/* ---- overlays ---- */
+	if (lvlState == LEVEL01_WIN)
+	{
+		drawResultPanel("LEVEL 01 COMPLETE",
+		                "You reached the finish line.",
+		                "Career mode and level 02 arrive in a later build.");
+	}
+	else if (lvlState == LEVEL01_GAMEOVER)
+	{
+		if (lvlLoseReason == LOSE_FUEL)
+			drawResultPanel("GAME OVER", "Out of fuel.",
+			                "Grab the OCTANE cans along the track to keep the tank alive.");
+		else
+			drawResultPanel("GAME OVER", "The bike is wrecked.",
+			                "Jump the barriers - every hit costs HP.");
+	}
+	else if (lvlPaused)
+	{
+		double pw = 460, ph = 150;
+		double px = SCREEN_WIDTH / 2 - pw / 2;
+		double py = SCREEN_HEIGHT / 2 - ph / 2;
+
+		iSetColor(COL_BG_R, COL_BG_G, COL_BG_B);
+		iFilledRectangle(px, py, pw, ph);
+		iSetColor(COL_RED_R, COL_RED_G, COL_RED_B);
+		drawBorder(px, py, pw, ph, 3);
+
+		iSetColor(COL_TEXT_R, COL_TEXT_G, COL_TEXT_B);
+		drawTextCentered(SCREEN_WIDTH / 2, py + 92, "PAUSED", GLUT_BITMAP_TIMES_ROMAN_24);
+		drawTextCentered(SCREEN_WIDTH / 2, py + 46,
+		                 "P  resume        R  restart        ESC  main menu",
+		                 GLUT_BITMAP_HELVETICA_12);
+	}
+}
+
+#endif
